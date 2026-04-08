@@ -1,0 +1,29 @@
+# Large data files — do not commit
+artifacts/telemetry.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Django
+*.sqlite3
+local_settings.py
+staticfiles/
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

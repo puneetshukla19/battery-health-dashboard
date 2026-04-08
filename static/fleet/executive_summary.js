@@ -1,0 +1,1365 @@
+"use strict";
+
+/* ─── state ──────────────────────────────────────────────────────────────────── */
+let _overview  = null;
+let _vehicles  = null;
+let _trend     = null;
+let _quintiles = null;
+let _tiers     = null;
+
+let _hoverTimeout = null;
+let _hideTimeout  = null;
+
+/* ─── helpers ────────────────────────────────────────────────────────────────── */
+const fmt    = (v, d = 2) => (v == null ? "—" : Number(v).toFixed(d));
+const fmtPct = (v)        => (v == null ? "—" : Number(v).toFixed(2) + "%");
+
+function fmtPeriod(first, last) {
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const d1 = new Date(first), d2 = new Date(last);
+  const y1 = String(d1.getFullYear()).slice(2);
+  const y2 = String(d2.getFullYear()).slice(2);
+  return `${months[d1.getMonth()]}'${y1} – ${months[d2.getMonth()]}'${y2}`;
+}
+
+function rulToYears(days) {
+  if (days == null) return "—";
+  return (days / 365.25).toFixed(2) + " yr";
+}
+
+/* ─── init ───────────────────────────────────────────────────────────────────── */
+async function init() {
+  try {
+    const [ov, veh, trend, quint, tiers] = await Promise.all([
+      fetch("/api/overview/").then(r => r.json()),
+      fetch("/api/vehicles/").then(r => r.json()),
+      fetch("/api/fleet-trend/").then(r => r.json()),
+      fetch("/api/quintiles/").then(r => r.json()),
+      fetch("/api/anomaly-tiers/").then(r => r.json()),
+    ]);
+
+    _overview  = ov;
+    _vehicles  = veh.vehicles;
+    _trend     = trend.trend;
+    _quintiles = quint.quintiles;
+    _tiers     = tiers;
+
+    renderKPICards();
+    renderFleetHealth();
+    renderQuintiles();
+    renderAnomalyTiers();
+    setupHoverCharts();
+  } catch (e) {
+    console.error("executive_summary init failed:", e);
+  } finally {
+    document.getElementById("loadingOverlay").style.display = "none";
+  }
+}
+
+/* ─── KPI cards ──────────────────────────────────────────────────────────────── */
+function renderKPICards() {
+  const o = _overview;
+  document.getElementById("kpiVehicles").textContent = o.n_vehicles;
+  document.getElementById("kpiMeanSoh").textContent  = fmtPct(o.fleet_mean_soh);
+  document.getElementById("kpiStdSoh").textContent   = fmtPct(o.fleet_std_soh);
+  document.getElementById("kpiEkfRul").textContent   = rulToYears(o.median_ekf_rul);
+  document.getElementById("kpiPeriod").textContent   = fmtPeriod(o.first_date, o.last_date);
+}
+
+/* ─── Fleet Health table ─────────────────────────────────────────────────────── */
+function renderFleetHealth() {
+  const o = _overview;
+  document.getElementById("ht_meanSoh").textContent = fmtPct(o.fleet_mean_soh);
+  document.getElementById("ht_stdSoh").textContent  = fmtPct(o.fleet_std_soh);
+  const sign = o.soh_trend_pct >= 0 ? "+" : "";
+  document.getElementById("ht_trend").textContent   = `${sign}${fmt(o.soh_trend_pct, 2)}%`;
+  document.getElementById("ht_ekfRul").textContent  = rulToYears(o.median_ekf_rul);
+  document.getElementById("ht_eol").textContent     = `${o.eol_threshold}%`;
+  document.getElementById("ht_span").textContent    = "95 days";
+}
+
+/* ─── Quintile table ─────────────────────────────────────────────────────────── */
+function renderQuintiles() {
+  document.querySelector("#quintileTable tbody").innerHTML =
+    _quintiles.map(q =>
+      `<tr>
+        <td>${q.quintile}</td>
+        <td class="text-end">${fmt(q.median_soh, 2)}%</td>
+      </tr>`
+    ).join("");
+}
+
+/* ─── Anomaly tiers ──────────────────────────────────────────────────────────── */
+function renderAnomalyTiers() {
+  const d = _tiers;
+
+  const vRow = (v, signal) =>
+    `<tr style="cursor:pointer" onclick="openVehicleDetail('${v.registration_number}')">
+      <td><code style="font-size:.8rem">${v.registration_number}</code></td>
+      <td class="small text-muted">${signal || ""}</td>
+      <td class="text-end">${fmtPct(v.current_soh)}</td>
+      <td class="text-end">${fmt(v.soh_slope, 4)}</td>
+      <td class="text-end fw-bold">${fmt(v.composite, 4)}</td>
+      <td class="text-end">${v.n_combined_anom}</td>
+    </tr>`;
+
+  document.querySelector("#tier1Table tbody").innerHTML = d.tier1.map(v => vRow(v, v.primary_signal)).join("");
+  document.querySelector("#tier2Table tbody").innerHTML = d.tier2.map(v => vRow(v, v.note)).join("");
+  document.querySelector("#tier3Table tbody").innerHTML = d.tier3.map(v => vRow(v, v.note)).join("");
+}
+
+/* ─── Hover chart setup ──────────────────────────────────────────────────────── */
+const HOVER_FNS = {
+  mean_soh: chartVehicleSoh,
+  std_soh:  chartSohStdDev,
+  trend:    chartSohTrend,
+  ekf_rul:  chartVehicleRul,
+  eol:      chartEolInfo,
+};
+
+function setupHoverCharts() {
+  const panel = document.getElementById("hoverPanel");
+
+  document.querySelectorAll("[data-hover]").forEach(row => {
+    row.addEventListener("mouseenter", () => {
+      clearTimeout(_hideTimeout);
+      clearTimeout(_hoverTimeout);
+      _hoverTimeout = setTimeout(() => showHoverChart(row.dataset.hover, row), 130);
+    });
+    row.addEventListener("mouseleave", () => {
+      clearTimeout(_hoverTimeout);
+      _hideTimeout = setTimeout(hideHoverChart, 220);
+    });
+  });
+
+  panel.addEventListener("mouseenter", () => clearTimeout(_hideTimeout));
+  panel.addEventListener("mouseleave", () => {
+    _hideTimeout = setTimeout(hideHoverChart, 220);
+  });
+}
+
+function showHoverChart(type, rowEl) {
+  const panel  = document.getElementById("hoverPanel");
+  const plotEl = document.getElementById("hoverPlot");
+  const textEl = document.getElementById("hoverText");
+  const rect   = rowEl.getBoundingClientRect();
+  const isText = type === "eol";
+  const isBigBar = type === "mean_soh" || type === "ekf_rul";
+  const maxH = window.innerHeight - 80;
+  // Big bar charts size dynamically; cap at viewport height
+  const panelH = isText ? 180 : (isBigBar ? Math.min(maxH, Math.max(300, (_vehicles || []).length * 22 + 80)) : 300);
+
+  // Position panel
+  let left = rect.right + 14;
+  if (left + 454 > window.innerWidth) left = rect.left - 464;
+  left = Math.max(8, left);
+
+  let top = rect.top - 4;
+  if (top + panelH > window.innerHeight - 8) top = Math.max(8, window.innerHeight - panelH - 8);
+  top = Math.max(8, top);
+
+  panel.style.left   = left + "px";
+  panel.style.top    = top + "px";
+  panel.style.height = isText ? "auto" : "300px";
+  panel.style.display = "block";
+
+  plotEl.style.display = isText ? "none" : "block";
+  textEl.style.display = isText ? "block" : "none";
+
+  // Purge any previous Plotly graph so layout dimensions are applied fresh,
+  // then render after the browser has committed the display:block paint.
+  if (!isText) Plotly.purge(plotEl);
+
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const fn = HOVER_FNS[type];
+    if (fn) fn(plotEl, textEl);
+  }));
+}
+
+function hideHoverChart() {
+  document.getElementById("hoverPanel").style.display = "none";
+}
+
+/* ─── Chart: vehicle SoH bar ─────────────────────────────────────────────────── */
+function chartVehicleSoh(plotEl) {
+  // Sort descending; reverse so highest SoH ends up at top of horizontal chart
+  const sorted = [..._vehicles]
+    .filter(v => v.current_soh != null)
+    .sort((a, b) => a.current_soh - b.current_soh);   // ascending → top of y-axis = highest
+
+  const labels = sorted.map(v => v.registration_number);
+  const colors = sorted.map(v =>
+    v.current_soh >= 97 ? "#22c55e" :
+    v.current_soh >= 95 ? "#f59e0b" : "#ef4444"
+  );
+
+  const h = Math.min(window.innerHeight - 80, Math.max(282, sorted.length * 22 + 80));
+  document.getElementById("hoverPanel").style.height = h + "px";
+
+  Plotly.newPlot(plotEl, [{
+    type: "bar",
+    orientation: "h",
+    y: labels,
+    x: sorted.map(v => v.current_soh),
+    marker: { color: colors },
+    hovertemplate: "%{y}<br>SoH: %{x:.2f}%<extra></extra>",
+  }], {
+    ...baseLayout("Vehicle EKF SoH — high to low"),
+    height: h,
+    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } }, range: [93, 100] },
+    yaxis: { tickfont: { family: "Inter, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
+    margin: { t: 34, b: 40, l: 110, r: 14 },
+  }, cfg());
+}
+
+/* ─── Chart: SoH std dev histogram ──────────────────────────────────────────── */
+function chartSohStdDev(plotEl) {
+  const sohVals = _vehicles.map(v => v.current_soh).filter(v => v != null);
+  const mu  = _overview.fleet_mean_soh;
+  const sig = _overview.fleet_std_soh;
+  const lo  = mu - 1.96 * sig;
+  const hi  = mu + 1.96 * sig;
+
+  Plotly.newPlot(plotEl, [{
+    type: "histogram",
+    x: sohVals,
+    nbinsx: 6,
+    marker: { color: "#3b82f6", opacity: 0.75 },
+    hovertemplate: "SoH: %{x:.2f}%<br>Count: %{y}<extra></extra>",
+  }], {
+    ...baseLayout(`SoH Distribution   µ=${mu.toFixed(3)}%  σ=${sig.toFixed(3)}%`),
+    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } } },
+    yaxis: { ...yAx("Count") },
+    shapes: [
+      {
+        // 95% confidence region (±1.96σ)
+        type: "rect",
+        x0: lo, x1: hi, y0: 0, y1: 1,
+        xref: "x", yref: "paper",
+        fillcolor: "rgba(59,130,246,0.10)",
+        line: { width: 0 },
+      },
+      {
+        // Mean line
+        type: "line",
+        x0: mu, x1: mu, y0: 0, y1: 1,
+        xref: "x", yref: "paper",
+        line: { color: "#1e293b", width: 1.5, dash: "dash" },
+      },
+    ],
+    annotations: [
+      {
+        x: mu, y: 0.98, xref: "x", yref: "paper",
+        text: `µ=${mu.toFixed(3)}%`, showarrow: false,
+        font: { size: 8.5, color: "#1e293b", family: "Inter" },
+        bgcolor: "rgba(255,255,255,0.8)", borderpad: 2,
+      },
+      {
+        x: lo, y: 0.5, xref: "x", yref: "paper",
+        text: "−1.96σ", showarrow: false,
+        font: { size: 8, color: "#64748b", family: "Inter" },
+      },
+      {
+        x: hi, y: 0.5, xref: "x", yref: "paper",
+        text: "+1.96σ", showarrow: false,
+        font: { size: 8, color: "#64748b", family: "Inter" },
+      },
+    ],
+  }, cfg());
+}
+
+/* ─── rolling median helper (removes single-day composition spikes) ──────────── */
+function rollingMedian(arr, win) {
+  const half = Math.floor(win / 2);
+  return arr.map((_, i) => {
+    const slice = arr.slice(Math.max(0, i - half), Math.min(arr.length, i + half + 1))
+                     .slice().sort((a, b) => a - b);
+    const mid = Math.floor(slice.length / 2);
+    return slice.length % 2 !== 0 ? slice[mid] : (slice[mid - 1] + slice[mid]) / 2;
+  });
+}
+
+/* ─── Chart: SoH trend line ──────────────────────────────────────────────────── */
+function chartSohTrend(plotEl) {
+  const first = _overview.first_soh;
+  const last  = _overview.last_soh;
+  if (first == null || last == null) return;
+
+  const slope = _overview.soh_trend_pct;
+  const sign  = slope >= 0 ? "+" : "";
+  const lineColor = last < first ? "#ef4444" : "#22c55e";
+
+  Plotly.newPlot(plotEl, [
+    {
+      type: "scatter", mode: "lines",
+      x: [_overview.first_date, _overview.last_date],
+      y: [first, last],
+      line: { color: lineColor, width: 2.5 },
+      hovertemplate: "%{x}<br>SoH: %{y:.3f}%<extra></extra>",
+    },
+    {
+      type: "scatter", mode: "markers+text",
+      x: [_overview.first_date, _overview.last_date],
+      y: [first, last],
+      marker: { color: ["#22c55e", lineColor], size: 7 },
+      text: [`${first.toFixed(2)}%`, `${last.toFixed(2)}%`],
+      textposition: ["middle right", "middle left"],
+      textfont: { size: 9, color: "#1e293b" },
+      hoverinfo: "skip",
+      showlegend: false,
+    },
+  ], {
+    ...baseLayout(`Fleet SoH Trend   ${sign}${slope.toFixed(2)}% over ${_overview.span_days} days`),
+    yaxis: { ...yAx("EKF SoH (%)") },
+    xaxis: { ...xAx() },
+  }, cfg());
+}
+
+/* ─── Chart: vehicle RUL bar ─────────────────────────────────────────────────── */
+function chartVehicleRul(plotEl) {
+  const all = [..._vehicles]
+    .filter(v => v.rul_days != null)
+    .sort((a, b) => a.rul_days - b.rul_days);   // ascending → highest RUL at top
+
+  // Outlier removal: exclude values above Q3 + 3×IQR
+  const vals = all.map(v => v.rul_days);
+  const q1    = vals[Math.floor(vals.length * 0.25)];
+  const q3    = vals[Math.floor(vals.length * 0.75)];
+  const fence = q3 + 3 * (q3 - q1);
+  const sorted = all.filter(v => v.rul_days <= fence);
+
+  const colors = sorted.map(v =>
+    v.rul_days > 730 ? "#22c55e" :
+    v.rul_days > 365 ? "#f59e0b" : "#ef4444"
+  );
+
+  const h = Math.min(window.innerHeight - 80, Math.max(282, sorted.length * 22 + 80));
+  document.getElementById("hoverPanel").style.height = h + "px";
+
+  Plotly.newPlot(plotEl, [{
+    type: "bar",
+    orientation: "h",
+    y: sorted.map(v => v.registration_number),
+    x: sorted.map(v => +(v.rul_days / 365.25).toFixed(2)),
+    marker: { color: colors },
+    hovertemplate: "%{y}<br>RUL: %{x:.2f} yr<extra></extra>",
+  }], {
+    ...baseLayout("EKF RUL per vehicle — high to low"),
+    height: h,
+    xaxis: { ...xAx(), title: { text: "RUL (years)", font: { size: 9 } } },
+    yaxis: { tickfont: { family: "Inter, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
+    margin: { t: 34, b: 40, l: 110, r: 14 },
+  }, cfg());
+}
+
+/* ─── EoL info text ──────────────────────────────────────────────────────────── */
+function chartEolInfo(plotEl, textEl) {
+  const mu       = _overview.fleet_mean_soh;
+  const eol      = _overview.eol_threshold;
+  const headroom = (((mu - eol) / mu) * 100).toFixed(1);
+
+  textEl.innerHTML = `
+    <div style="padding:16px 18px">
+      <div style="font-size:.85rem;font-weight:700;color:#0f172a;margin-bottom:10px">
+        End-of-Life SoH Threshold — ${eol}%
+      </div>
+      <p style="font-size:.8rem;color:#475569;margin:0 0 10px">
+        A battery pack is classified as <strong>end-of-life (EoL)</strong> when its State of Health
+        drops below <strong>${eol}%</strong> of its rated capacity.
+      </p>
+      <p style="font-size:.8rem;color:#475569;margin:0 0 12px">
+        Below ${eol}%, capacity fade becomes non-linear and range unpredictability increases
+        significantly — making the pack unsuitable for commercial EV operation.
+      </p>
+      <div style="background:#f0fdf4;border-left:3px solid #16a34a;padding:8px 12px;
+                  border-radius:0 4px 4px 0;font-size:.78rem;color:#166534">
+        Fleet current mean SoH: <strong>${fmtPct(mu)}</strong> —
+        <strong>${headroom}%</strong> of remaining useful capacity before EoL
+      </div>
+    </div>
+  `;
+}
+
+/* ─── Plotly layout helpers ──────────────────────────────────────────────────── */
+const FONT = { family: "Inter, system-ui, sans-serif", size: 10, color: "#475569" };
+
+function baseLayout(title) {
+  return {
+    title: {
+      text: title,
+      font: { ...FONT, size: 10.5, color: "#0f172a" },
+      x: 0.02, xanchor: "left",
+    },
+    width: 448,
+    height: 282,
+    margin: { t: 34, b: 44, l: 46, r: 14 },
+    paper_bgcolor: "white",
+    plot_bgcolor: "#f8fafc",
+    font: FONT,
+    showlegend: false,
+  };
+}
+
+function yAx(label) {
+  return {
+    title: { text: label, font: { size: 9 } },
+    gridcolor: "#e2e8f0",
+    tickfont: FONT,
+  };
+}
+
+function xAx() {
+  return { gridcolor: "#e2e8f0", tickfont: { ...FONT, size: 8.5 } };
+}
+
+function cfg() {
+  return { displayModeBar: false, responsive: false };
+}
+
+/* ─── boot ───────────────────────────────────────────────────────────────────── */
+document.addEventListener("DOMContentLoaded", () => {
+  init();
+  // Close overlay when clicking the dark backdrop (outside the panel)
+  document.getElementById("vdBackdrop").addEventListener("click", function(e) {
+    if (e.target === this) closeVehicleDetail();
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   VEHICLE DETAIL OVERLAY
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Coef label formatter ───────────────────────────────────────────────────── */
+const COEF_LABEL_MAP = {
+  dod_stress: "DoD stress", cum_efc: "Cumulative EFC", aging_index: "Aging index",
+  days_since_first: "Days since first session", soh_trend_slope: "SoH trend slope",
+  cycle_soh: "Cycle SoH", ir_ohm_mean_ewm10: "IR mean EWM10",
+  cell_spread_mean_ewm10: "Cell spread EWM10", vsag_rate_per_hr_ewm10: "V-sag rate EWM10",
+  temp_rise_rate_ewm10: "Temp rise EWM10", ir_event_trend_slope: "IR event trend slope",
+  ir_ohm_trend_slope: "IR trend slope", spread_trend_slope: "Spread trend slope",
+  vsag_trend_slope: "V-sag trend slope", ir_event_rate: "IR event rate",
+  energy_per_km: "Energy per km", energy_kwh: "Energy kWh",
+  energy_per_loaded_session: "Energy per loaded session",
+  block_capacity_ah: "Block capacity AH", block_odometer_km: "Block odometer km",
+  charging_rate_kw: "Charge rate kW", thermal_stress: "Thermal stress",
+  c_rate_chg: "Charge C-rate", is_loaded: "Is loaded", odometer_km: "Odometer km",
+  duration_hr: "Duration hr", n_vsag: "V-sag count", n_high_ir: "High IR count",
+  n_low_soc: "Low SoC count", bms_coverage: "BMS coverage",
+  weak_subsystem_consistency: "Weak subsystem consistency",
+  hot_subsystem_consistency: "Hot subsystem consistency",
+  subsystem_voltage_std: "Subsystem voltage STD", total_alerts: "Total alerts",
+  cell_health_poor: "Cell health poor", n_cell_undervoltage: "Cell undervoltage count",
+  n_cell_overvoltage: "Cell overvoltage count", rapid_heating: "Rapid heating",
+  high_energy_per_km: "High energy per km", slow_charging: "Slow Charge rate",
+  fast_charging: "Fast Charge rate", ref_capacity_ah: "Reference capacity AH",
+  cell_spread_max: "Cell spread max", speed_mean: "Speed mean",
+};
+
+function formatCoefLabel(name) {
+  if (COEF_LABEL_MAP[name]) return COEF_LABEL_MAP[name];
+  // Fallback: sentence case, preserve known acronyms
+  const acro = { ir: "IR", soh: "SoH", ekf: "EKF", dod: "DoD", efc: "EFC",
+                 ewm10: "EWM10", ewm: "EWM", std: "STD", bms: "BMS", ah: "AH",
+                 kw: "kW", km: "km", chg: "Charge" };
+  return name.split("_").map((w, i) => {
+    const l = w.toLowerCase();
+    if (acro[l]) return acro[l];
+    return i === 0 ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase();
+  }).join(" ");
+}
+
+/* ─── RUL explanation generator ──────────────────────────────────────────────── */
+function generateRulAnalysis(vehicle) {
+  const soh      = vehicle.current_soh;
+  const slope    = vehicle["soh_slope_%per_day"];
+  const rulDays  = vehicle.rul_days;
+  const eol      = (_overview && _overview.eol_threshold) || 80;
+  const rel      = vehicle.rul_reliability;
+
+  const headroom   = soh != null ? +(soh - eol).toFixed(2) : null;
+  const linearRul  = (slope && slope < 0 && headroom != null)
+                     ? Math.round(headroom / Math.abs(slope)) : null;
+
+  const lines = [];
+
+  if (rulDays != null && linearRul != null) {
+    const diff = Math.abs(linearRul - rulDays);
+    if (diff <= 15) {
+      lines.push(`The RUL of <strong>${rulDays} days</strong> is mathematically sound. ` +
+        `With ${headroom}% of SoH headroom remaining to the ${eol}% EoL threshold and a slope of ` +
+        `<strong>${slope.toFixed(4)}%/day</strong>, linear extrapolation gives ${linearRul} days — ` +
+        `directly consistent with the stated estimate. This is <em>not</em> a data error.`);
+    } else {
+      lines.push(`Linear extrapolation from the current slope (${slope.toFixed(4)}%/day) gives ` +
+        `${linearRul} days; the model reports <strong>${rulDays} days</strong>, reflecting Bayesian ` +
+        `adjustments for non-linear or accelerating decline detected in historical sessions.`);
+    }
+  } else if (rulDays != null) {
+    lines.push(`Reported RUL: <strong>${rulDays} days</strong>.`);
+  }
+
+  if (soh != null && soh > 95 && rulDays != null && rulDays < 200) {
+    lines.push(`Despite a healthy-looking absolute SoH of <strong>${fmtPct(soh)}</strong>, ` +
+      `the <em>rate</em> of decline is what matters here. At ${Math.abs(slope).toFixed(4)}%/day ` +
+      `this is the fastest-degrading vehicle in the fleet. A battery at 97% falling steeply is ` +
+      `more at risk than one sitting at 94% with a flat trajectory.`);
+  }
+
+  if (rel === "low_r2") {
+    lines.push(`⚠ RUL reliability is flagged <strong>low R²</strong> — the Bayesian Ridge model fit ` +
+      `has reduced statistical confidence. Treat the RUL as directional rather than precise, ` +
+      `and increase monitoring frequency.`);
+  } else if (rel === "insufficient_data") {
+    lines.push(`⚠ <strong>Insufficient charging sessions</strong> were available to fit a reliable ` +
+      `calendar-path model. The estimate carries higher uncertainty — prioritise inspection.`);
+  }
+
+  return lines.join("<br><br>");
+}
+
+/* ─── Coef comparison text generator ────────────────────────────────────────── */
+function generateCoefComparison(reg, vehCoef, globalCoef) {
+  const shared = Object.keys(vehCoef).filter(k => globalCoef[k] != null && vehCoef[k] < 0);
+  if (!shared.length) return "No shared negative coefficient features to compare.";
+
+  const ranked = shared
+    .map(k => ({ k, v: vehCoef[k], g: globalCoef[k], diff: vehCoef[k] - globalCoef[k] }))
+    .sort((a, b) => a.v - b.v);   // most negative vehicle coef first
+
+  const top3     = ranked.slice(0, 3).map(x => `<strong>${formatCoefLabel(x.k)}</strong>`);
+  const vehSpec  = ranked.filter(x => x.diff < -0.000005).slice(0, 2);
+  const fleetSpec = ranked.filter(x => x.diff > 0.000005).slice(0, 2);
+
+  const fleetTop = Object.entries(globalCoef)
+    .filter(([, v]) => v < 0)
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, 3)
+    .map(([k]) => `<strong>${formatCoefLabel(k)}</strong>`);
+
+  let text = `For <strong>${reg}</strong>, the primary degradation contributors by Bayesian weight are ` +
+    `${top3.join(", ")}. `;
+
+  if (vehSpec.length) {
+    const labels = vehSpec.map(x => `<strong>${formatCoefLabel(x.k)}</strong>`);
+    text += `Compared to the fleet median, this vehicle shows heightened sensitivity to ` +
+      `${labels.join(" and ")}: these coefficients are more negative here than the fleet average, ` +
+      `meaning these factors are accelerating degradation more than is typical. `;
+  }
+
+  if (fleetSpec.length) {
+    const labels = fleetSpec.map(x => `<strong>${formatCoefLabel(x.k)}</strong>`);
+    text += `Fleet-wide, ${labels.join(" and ")} are dominant degradation drivers — ` +
+      `this vehicle is comparatively less sensitive to ${fleetSpec.length > 1 ? "these" : "this"}, ` +
+      `suggesting its degradation pathway is somewhat distinct from the fleet average. `;
+  } else {
+    if (fleetTop.length) {
+      text += `The fleet median is dominated by ${fleetTop.slice(0, 2).join(" and ")}, ` +
+        `which aligns with this vehicle's profile. `;
+    }
+  }
+
+  text += `A more negative coefficient means that feature has a stronger linear association with ` +
+    `SoH decline — it is a degradation amplifier, not a root cause in isolation.`;
+
+  return text;
+}
+
+/* ─── Tier info lookup ────────────────────────────────────────────────────────── */
+function getVehicleTierInfo(reg) {
+  const t1 = _tiers.tier1.find(v => v.registration_number === reg);
+  if (t1) return { tier: 1, label: "TIER 1 — IMMEDIATE ATTENTION", color: "#b91c1c", bg: "#fef2f2", signal: t1.primary_signal || "" };
+  const t2 = _tiers.tier2.find(v => v.registration_number === reg);
+  if (t2) return { tier: 2, label: "TIER 2 — MONITOR CLOSELY", color: "#92400e", bg: "#fffbeb", signal: t2.note || "" };
+  const t3 = _tiers.tier3.find(v => v.registration_number === reg);
+  if (t3) return { tier: 3, label: "TIER 3 — ELEVATED BUT STABLE", color: "#166534", bg: "#f0fdf4", signal: t3.note || "" };
+  return { tier: 0, label: "", color: "#475569", bg: "#f8fafc", signal: "" };
+}
+
+/* ─── Open / Close ───────────────────────────────────────────────────────────── */
+async function openVehicleDetail(reg) {
+  const vehicle  = (_vehicles || []).find(v => v.registration_number === reg);
+  if (!vehicle) return;
+
+  const backdrop = document.getElementById("vdBackdrop");
+  const body     = document.getElementById("vdBody");
+  const tierInfo = getVehicleTierInfo(reg);
+
+  document.getElementById("vdTitle").textContent = reg;
+  document.getElementById("vdTierBadge").textContent = tierInfo.label;
+  document.getElementById("vdTierBadge").style.color  = tierInfo.color;
+  document.getElementById("vdTierBadge").style.background = tierInfo.bg;
+
+  body.innerHTML = `<div style="text-align:center;padding:48px">
+    <div class="spinner-border text-primary"></div><p style="margin-top:12px;color:#64748b">Loading vehicle data…</p>
+  </div>`;
+  backdrop.style.display = "flex";
+
+  // Prevent page scroll while open
+  document.body.style.overflow = "hidden";
+
+  try {
+    const [bands, coef, sessData, bdData] = await Promise.all([
+      fetch(`/api/soh-bands/${reg}/`).then(r => r.json()),
+      fetch(`/api/bayes-coef/${reg}/`).then(r => r.json()),
+      fetch(`/api/sessions/${reg}/`).then(r => r.json()),
+      fetch(`/api/anomaly-breakdown/${reg}/`).then(r => r.json()),
+    ]);
+
+    body.innerHTML = "";
+    renderVDSection1(vehicle, tierInfo, body);
+    renderVDSection2(bands, vehicle, body);
+    renderVDSection3(coef, vehicle, body);
+    renderVDSection4(sessData, bdData, reg, body);
+  } catch (e) {
+    body.innerHTML = `<div style="padding:24px;color:#b91c1c">Failed to load data: ${e.message}</div>`;
+  }
+}
+
+function closeVehicleDetail() {
+  document.getElementById("vdBackdrop").style.display = "none";
+  document.body.style.overflow = "";
+}
+
+/* ─── Section 1: Signal Analysis ────────────────────────────────────────────── */
+function renderVDSection1(vehicle, tierInfo, container) {
+  const soh       = vehicle.current_soh;
+  const slope     = vehicle["soh_slope_%per_day"];
+  const composite = vehicle.composite_degradation_score;
+  const anomCount = vehicle.n_combined_anom;
+  const rulDays   = vehicle.rul_days;
+  const eol       = (_overview && _overview.eol_threshold) || 80;
+  const headroom  = soh != null ? (soh - eol).toFixed(2) : "—";
+
+  const rulColor  = rulDays == null ? "#64748b" : rulDays < 180 ? "#ef4444" : rulDays < 365 ? "#f59e0b" : "#22c55e";
+  const sohColor  = soh == null ? "#64748b" : soh < 90 ? "#ef4444" : soh < 95 ? "#f59e0b" : "#22c55e";
+  const rulDisplay = rulDays != null
+    ? `${rulDays} days <span style="font-size:.7rem;font-weight:400;color:#94a3b8">(${(rulDays/365.25).toFixed(2)} yr)</span>`
+    : "—";
+
+  const rulAnalysis       = generateRulAnalysis(vehicle);
+  const compositeAnalysis = generateCompositeAnalysis(vehicle);
+
+  const sec = document.createElement("div");
+  sec.className = "vd-section";
+  sec.innerHTML = `
+    <div class="vd-section-hdr">Signal Analysis</div>
+    <div class="vd-stats-grid">
+      <div class="vd-stat">
+        <div class="vd-stat-label">EKF SoH</div>
+        <div class="vd-stat-value" style="color:${sohColor}">${fmtPct(soh)}</div>
+      </div>
+      <div class="vd-stat">
+        <div class="vd-stat-label">SoH slope</div>
+        <div class="vd-stat-value" style="color:${slope < 0 ? '#ef4444' : '#22c55e'}">${slope != null ? slope.toFixed(5) + "%/d" : "—"}</div>
+      </div>
+      <div class="vd-stat">
+        <div class="vd-stat-label">EKF RUL</div>
+        <div class="vd-stat-value" style="color:${rulColor}">${rulDisplay}</div>
+      </div>
+      <div class="vd-stat">
+        <div class="vd-stat-label">SoH headroom to EoL (${eol}%)</div>
+        <div class="vd-stat-value">${headroom}%</div>
+      </div>
+      <div class="vd-stat">
+        <div class="vd-stat-label">Composite score</div>
+        <div class="vd-stat-value">${composite != null ? composite.toFixed(4) : "—"}</div>
+      </div>
+      <div class="vd-stat">
+        <div class="vd-stat-label">Anomalies</div>
+        <div class="vd-stat-value">${anomCount != null ? anomCount : "—"}</div>
+      </div>
+      <div class="vd-stat">
+        <div class="vd-stat-label">Bayes SoH pred.</div>
+        <div class="vd-stat-value">${vehicle.bayes_soh_pred != null ? fmtPct(vehicle.bayes_soh_pred) : "—"}</div>
+      </div>
+      <div class="vd-stat">
+        <div class="vd-stat-label">Reliability</div>
+        <div class="vd-stat-value" style="font-size:.8rem">${vehicle.rul_reliability ? vehicle.rul_reliability.replace(/_/g," ") : "—"}</div>
+      </div>
+    </div>
+    <div class="vd-analysis-box">${tierInfo.signal || "No signal note available."}</div>
+    ${rulAnalysis       ? `<div class="vd-rul-warn">${rulAnalysis}</div>` : ""}
+    ${compositeAnalysis ? `<div class="vd-rul-warn" style="background:#fffbeb;border-color:#f59e0b;color:#78350f;margin-top:10px">${compositeAnalysis}</div>` : ""}
+  `;
+  container.appendChild(sec);
+}
+
+/* ─── Section 2: EKF Bollinger Bands + Slope ─────────────────────────────────── */
+function renderVDSection2(d, vehicle, container) {
+  const sec = document.createElement("div");
+  sec.className = "vd-section";
+
+  if (d.error || !d.bands || !d.bands.length) {
+    sec.innerHTML = `<div class="vd-section-hdr">EKF SoH Bollinger Bands</div>
+      <div style="padding:20px;color:#94a3b8;font-size:.85rem">${d.error || "No EKF band data available."}</div>`;
+    container.appendChild(sec);
+    return;
+  }
+
+  const chartId = "vdBandsChart";
+  sec.innerHTML = `<div class="vd-section-hdr">EKF SoH Bollinger Bands</div>
+    <div id="${chartId}" style="min-height:320px"></div>`;
+  container.appendChild(sec);
+
+  // Render after DOM paint
+  requestAnimationFrame(() => {
+    const dates = d.bands.map(b => b.date);
+    const ekf   = d.bands.map(b => b.ekf_soh);
+    const upper = d.bands.map(b => b.upper);
+    const lower = d.bands.map(b => b.lower);
+    const bms   = d.bands.map(b => b.bms_soh_obs);
+
+    const traces = [
+      { x: dates, y: lower, type: "scatter", mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip", name: "_lower" },
+      { x: dates, y: upper, type: "scatter", mode: "lines",
+        fill: "tonexty", fillcolor: "rgba(59,130,246,0.10)",
+        line: { color: "rgba(99,102,241,0.45)", dash: "dot", width: 1 },
+        name: "±2σ band", hovertemplate: "Upper: %{y:.2f}%<extra></extra>" },
+      { x: dates, y: ekf, type: "scatter", mode: "lines",
+        line: { color: "#3b82f6", width: 2.5 },
+        name: "EKF SoH", hovertemplate: "EKF SoH: %{y:.3f}%<extra></extra>" },
+    ];
+
+    // BMS obs
+    const bmsClean = bms.filter(v => v != null && isFinite(v));
+    if (bmsClean.length) {
+      traces.push({ x: dates, y: bms, type: "scatter", mode: "markers",
+        marker: { color: "#f59e0b", size: 5, opacity: 0.65 },
+        name: "BMS SoH", hovertemplate: "BMS: %{y:.1f}%<extra></extra>" });
+    }
+
+    // Discharge dots
+    if (d.discharge_ekf && d.discharge_ekf.length) {
+      traces.push({ x: d.discharge_ekf.map(b => b.date), y: d.discharge_ekf.map(b => b.ekf_soh),
+        type: "scatter", mode: "markers",
+        marker: { color: "#94a3b8", size: 3, opacity: 0.5 },
+        name: "EKF discharge", hovertemplate: "Discharge: %{y:.3f}%<extra></extra>" });
+    }
+
+    // Slope trend line anchored at first EKF value
+    const slope = vehicle["soh_slope_%per_day"];
+    if (slope != null && dates.length >= 2) {
+      const d0    = new Date(dates[0]);
+      const d1    = new Date(dates[dates.length - 1]);
+      const nDays = (d1 - d0) / 86400000;
+      const y0    = ekf[0];
+      const y1    = y0 + slope * nDays;
+      traces.push({ x: [dates[0], dates[dates.length - 1]], y: [y0, y1],
+        type: "scatter", mode: "lines",
+        line: { color: slope < 0 ? "#ef4444" : "#22c55e", width: 1.5, dash: "dash" },
+        name: `Slope (${slope.toFixed(4)}%/d)`,
+        hovertemplate: "Trend: %{y:.3f}%<extra></extra>" });
+    }
+
+    const bandY = [...ekf, ...upper, ...lower].filter(v => v != null && isFinite(v));
+    const yMin  = Math.floor(Math.min(...bandY) - 0.5);
+    const yMax  = Math.ceil(Math.max(...bandY)  + 0.5);
+
+    Plotly.newPlot(chartId, traces, {
+      paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
+      font: { family: "Inter, system-ui, sans-serif", size: 11, color: "#475569" },
+      margin: { l: 55, r: 20, t: 20, b: 55 },
+      xaxis: { title: "Date", gridcolor: "#e2e8f0", tickangle: -30 },
+      yaxis: { title: "SoH (%)", gridcolor: "#e2e8f0", range: [yMin, yMax] },
+      legend: { orientation: "h", y: -0.22, font: { size: 10 } },
+      hovermode: "x unified",
+    }, { displayModeBar: false, responsive: true });
+  });
+}
+
+/* ─── Section 3: Bayesian Ridge Coefficients ─────────────────────────────────── */
+function renderVDSection3(coef, vehicle, container) {
+  const sec = document.createElement("div");
+  sec.className = "vd-section";
+
+  const hasVeh    = coef.vehicle && Object.keys(coef.vehicle).length > 0;
+  const hasGlobal = coef.global  && Object.keys(coef.global).length  > 0;
+
+  if (!hasVeh && !hasGlobal) {
+    sec.innerHTML = `<div class="vd-section-hdr">Bayesian Ridge Coefficients</div>
+      <div style="padding:20px;color:#94a3b8;font-size:.85rem">${coef.error || "No coefficient data available."}</div>`;
+    container.appendChild(sec);
+    return;
+  }
+
+  const vChartId = "vdCoefVehicle";
+  const gChartId = "vdCoefGlobal";
+
+  sec.innerHTML = `
+    <div class="vd-section-hdr">Bayesian Ridge Coefficients</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">
+          ${vehicle.registration_number} — per-vehicle
+        </div>
+        <div id="${vChartId}"></div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">
+          Fleet global (median)
+        </div>
+        <div id="${gChartId}"></div>
+      </div>
+    </div>
+    <div class="vd-coef-compare" id="vdCoefCompare" style="margin-top:14px">
+      Generating analysis…
+    </div>
+  `;
+  container.appendChild(sec);
+
+  requestAnimationFrame(() => {
+    _renderCoefBar(vChartId, coef.vehicle,  "#3b82f6");
+    _renderCoefBar(gChartId, coef.global,   "#6366f1");
+
+    if (hasVeh && hasGlobal) {
+      document.getElementById("vdCoefCompare").innerHTML =
+        generateCoefComparison(vehicle.registration_number, coef.vehicle, coef.global);
+    }
+  });
+}
+
+function _renderCoefBar(divId, coefObj, color) {
+  const entries = Object.entries(coefObj)
+    .filter(([, v]) => v < 0)
+    .sort((a, b) => a[1] - b[1]);  // most negative first (will be longest bar)
+
+  if (!entries.length) {
+    document.getElementById(divId).innerHTML =
+      `<div style="padding:16px;color:#94a3b8;font-size:.82rem">No negative coefficients.</div>`;
+    return;
+  }
+
+  const labels = entries.map(([k]) => formatCoefLabel(k));
+  const values = entries.map(([, v]) => v);   // keep negative; reversed axis makes bars go right
+  const h      = Math.max(220, entries.length * 24 + 70);
+
+  document.getElementById(divId).style.minHeight = h + "px";
+  Plotly.newPlot(divId, [{
+    type: "bar", orientation: "h",
+    y: labels, x: values,
+    marker: { color },
+    hovertemplate: "%{y}<br>coef: %{x:.6f}<extra></extra>",
+  }], {
+    paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
+    font: { family: "Inter, system-ui, sans-serif", size: 10, color: "#475569" },
+    height: h,
+    margin: { l: 170, r: 16, t: 16, b: 36 },
+    xaxis: { title: "Coefficient value", gridcolor: "#e2e8f0", tickfont: { size: 9 },
+             autorange: "reversed" },   // negative values + reversed → bars extend left→right
+    yaxis: { automargin: true, tickfont: { size: 9.5 } },
+  }, { displayModeBar: false, responsive: true });
+}
+
+/* ─── Composite score explanation ────────────────────────────────────────────── */
+function generateCompositeAnalysis(vehicle) {
+  const soh       = vehicle.current_soh;
+  const slope     = vehicle["soh_slope_%per_day"];
+  const composite = vehicle.composite_degradation_score;
+  if (composite == null || slope == null) return "";
+
+  // Only show when there's a notable disconnect: fast slope but low composite
+  const fastSlope   = slope < -0.08;
+  const lowComposite = composite < 0.40;
+  if (!fastSlope || !lowComposite) return "";
+
+  const eol      = (_overview && _overview.eol_threshold) || 80;
+  const deficit  = soh != null ? (100 - soh).toFixed(2) : "?";
+
+  return `<strong>Why is the composite score low despite such a steep slope?</strong><br><br>` +
+    `The composite score (${composite.toFixed(4)}) is a weighted combination of <em>seven signals</em>, ` +
+    `with the SoH slope carrying <strong>zero direct weight</strong>. The primary component (25%) is the ` +
+    `EKF SoH <em>health deficit</em> — how far current SoH sits below the fleet maximum, not how fast ` +
+    `it is falling. At ${fmtPct(soh)}, the health deficit is only ${deficit}%, which is low relative to ` +
+    `the fleet, keeping that component close to zero. The remaining 75% weights secondary signal ` +
+    `<em>trend slopes</em>: rising V-sag rate (15%), IR event rate (15%), energy/km (13%), temp rise ` +
+    `rate (11%), and cell spread (11%). If these secondary signals are currently flat or near-fleet-average ` +
+    `for this vehicle, the composite stays low regardless of how fast SoH is declining.<br><br>` +
+    `<strong>Could the slope be exaggerated (omitted variable bias)?</strong><br><br>` +
+    `Possibly. The EKF slope is estimated from a finite window of charging sessions. Several factors can ` +
+    `inflate the apparent rate: (1) <em>seasonal temperature effects</em> — cold ambient temperatures ` +
+    `suppress observed capacity, creating an apparent downward trend if the data span crosses seasons; ` +
+    `(2) <em>sparse early data</em> — if the first few charging sessions had high EKF uncertainty or ` +
+    `atypically high BMS-reported SoH, the OLS anchor is too high, steepening the fitted line; ` +
+    `(3) <em>charging depth shifts</em> — if the vehicle shifted from consistent full charges to ` +
+    `partial charges, observed SoH comparison points become inconsistent; ` +
+    `(4) <em>BMS calibration drift</em> — periodic BMS recalibrations can introduce step-changes that ` +
+    `look like gradual decline in aggregate. The RUL estimate should be treated as a best-available ` +
+    `forward projection, not a precise countdown — increase monitoring frequency and validate with ` +
+    `a controlled full-charge capacity test.`;
+}
+
+/* ─── Section 4: Anomalous Sessions ─────────────────────────────────────────── */
+/* ════════════════════════════════════════════════════════════════════════════
+   SECTION 4 — ALERT BREAKDOWN + ANOMALOUS SESSIONS + TELEMETRY
+   (exact replication of localhost sections 7 / 8 / 9)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+// ── Session table constants (mirrors dashboard.js) ────────────────────────
+const VD_SESS_HEADERS = [
+  "Vehicle","Start","End","Type","Start SoC","End SoC","EKF SoH","Duration (hrs)",
+  "IF Score","IF Anomaly","CUSUM Anomaly","Degr. Score","Reason","Flagged",
+  "V-Sags","IR Mean","Spread","Energy/km","Energy KWh","Low SOC",
+  "Ref Cap AH","Voltage","Current","Cap AH Dischrg.","Cap AH Chrg.","Cap AH Plugin",
+  "Cycle SOH","Block Cap AH","Block Odm Km","Chg Rate KW",
+  "Cell Spread","Weak Subsys.","Hot Subsys.","Subsys V Std",
+  "Temp Rise","BMS Cov.","Speed","Is Loaded","Cum EFC",
+  "Days Since First","Aging Index",
+  "VSag Rate/hr","IR Event Rate","IR EWM10","Spread EWM10",
+  "Temp EWM10","VSag EWM10","VSag Trend","IR Evt Trend",
+  "IR Trend","Spread Trend","SoH Trend","C-Rate Chg",
+  "DoD Stress","Thermal Stress","E/Loaded","Total Alerts",
+  "Cell Health","Cell Undervolt","Cell Overvolt","Rapid Heat","High E/km","Slow Chg","Fast Chg",
+];
+const VD_SESS_FIELDS = [
+  "registration_number","start_time_ist","end_time_ist","session_type","soc_start","soc_end","ekf_soh","duration_hr",
+  "if_score","if_anomaly","cusum_anomaly","composite_degradation_score","anomaly_reason","is_anomalous",
+  "n_vsag","ir_ohm_mean","cell_spread_mean","energy_per_km","energy_kwh","n_low_soc",
+  "ref_capacity_ah","voltage_mean_new","current_mean_new","capacity_ah_discharge_new","capacity_ah_charge_new","capacity_ah_plugin_new",
+  "cycle_soh","block_capacity_ah","block_odometer_km","charging_rate_kw",
+  "cell_spread_max","weak_subsystem_consistency","hot_subsystem_consistency","subsystem_voltage_std",
+  "temp_rise_rate","bms_coverage","speed_mean","is_loaded","cum_efc",
+  "days_since_first","aging_index",
+  "vsag_rate_per_hr","ir_event_rate","ir_ohm_mean_ewm10","cell_spread_mean_ewm10",
+  "temp_rise_rate_ewm10","vsag_rate_per_hr_ewm10","vsag_trend_slope","ir_event_trend_slope",
+  "ir_ohm_trend_slope","spread_trend_slope","soh_trend_slope","c_rate_chg",
+  "dod_stress","thermal_stress","energy_per_loaded_session","total_alerts",
+  "cell_health_poor","n_cell_undervoltage","n_cell_overvoltage","rapid_heating","high_energy_per_km","slow_charging","fast_charging",
+];
+const VD_SESS_BOOL = new Set(["if_anomaly","cusum_anomaly","is_anomalous",
+  "cell_health_poor","rapid_heating","high_energy_per_km","slow_charging","fast_charging"]);
+
+// ── Per-overlay state ─────────────────────────────────────────────────────
+let _vdSessCache  = null;
+let _vdSessFilter = { detector: null, signal: null, sessionType: null };
+let _vdReg        = null;
+
+// ── CUSUM / IF filter maps (mirrors dashboard.js) ─────────────────────────
+const VD_CUSUM_FILTER = {
+  "EKF SoH Decline": s => !!(s.cusum_ekf_soh_alarm),
+  "BMS SoH Decline": s => !!(s.cusum_soh_alarm),
+  "Cycle SoH Drop":  s => !!(s.cusum_cycle_soh_alarm),
+  "IR Degradation":  s => !!(s.cusum_ir_slope_alarm) || (s.n_high_ir > 0),
+  "Cell Spread":     s => !!(s.cusum_spread_alarm) || !!(s.cusum_spread_slope_alarm),
+  "Thermal Stress":  s => !!(s.cusum_heat_alarm),
+  "Efficiency Loss": s => !!(s.cusum_epk_alarm),
+  "Voltage Sag":     s => (s.n_vsag > 0),
+};
+const VD_IF_KEYWORDS = {
+  "IR Degradation":          ["n_high_ir","ir_ohm_mean","ir_event_rate"],
+  "Voltage Sag":             ["n_vsag","d_vsag_per_cycle"],
+  "Cell Spread / Imbalance": ["cell_spread","subsystem_voltage_std"],
+  "Thermal Stress":          ["temp","thermal_stress"],
+  "Efficiency / Capacity":   ["energy_per_loaded_session","capacity_ah_discharge"],
+  "High DoD":                ["dod_stress"],
+  "Low SoC / Undervoltage":  ["n_low_soc","voltage_min"],
+  "SoH Decline":             ["soh","ekf_soh_delta","cycle_soh"],
+  "Usage Pattern":           ["odometer_km","duration_hr"],
+};
+
+function _vdApplyFilter(sessions, { excludeSessionType = false } = {}) {
+  const { detector, signal, sessionType } = _vdSessFilter;
+  let f = sessions;
+  if (detector === "if")    f = f.filter(s => !!(s.if_anomaly));
+  else if (detector === "cusum") f = f.filter(s =>
+    !!(s.cusum_ekf_soh_alarm)||!!(s.cusum_soh_alarm)||!!(s.cusum_cycle_soh_alarm)||
+    !!(s.cusum_heat_alarm)||!!(s.cusum_spread_alarm)||!!(s.cusum_spread_slope_alarm)||
+    !!(s.cusum_epk_alarm)||!!(s.cusum_ir_slope_alarm));
+  if (signal) {
+    if (detector === "if") {
+      const kws = VD_IF_KEYWORDS[signal] || [];
+      f = f.filter(s => kws.some(k => (s.if_reason||"").toLowerCase().includes(k.toLowerCase())));
+    } else {
+      const fn = VD_CUSUM_FILTER[signal];
+      if (fn) f = f.filter(fn);
+    }
+  }
+  if (!excludeSessionType && sessionType) f = f.filter(s => s.session_type === sessionType);
+  return f;
+}
+
+// ── Donut chart helpers ───────────────────────────────────────────────────
+const VD_DONUT_W = 286, VD_DONUT_H = 286;
+const VD_DONUT_LAYOUT = {
+  paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
+  font: { family: "Inter, system-ui, sans-serif", size: 10, color: "#475569" },
+  margin: { l: 10, r: 10, t: 10, b: 10 },
+  showlegend: true,
+  legend: { orientation: "h", x: 0.5, xanchor: "center", y: 0.04, font: { size: 9 }, tracegroupgap: 2 },
+};
+const VD_SIG_PALETTE = ["#ef4444","#f97316","#eab308","#10b981","#06b6d4","#8b5cf6","#3b82f6","#64748b"];
+
+async function _vdRenderDetectorChart(byDetector) {
+  const el = document.getElementById("vdDetChart");
+  if (!el) return;
+  el.innerHTML = "";
+  await Plotly.newPlot("vdDetChart", [{
+    type: "pie", hole: 0.5,
+    domain: { x: [0.05, 0.95], y: [0.28, 1] },
+    labels: Object.keys(byDetector), values: Object.values(byDetector),
+    marker: { colors: ["#3b82f6","#f59e0b"] },
+    textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
+    hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
+  }], { ...VD_DONUT_LAYOUT, width: VD_DONUT_W, height: VD_DONUT_H },
+  { displayModeBar: false });
+}
+
+async function _vdRenderSignalChart(bySignal, scope) {
+  const el = document.getElementById("vdSigChart");
+  if (!el) return;
+  el.innerHTML = "";
+  document.getElementById("vdSigHeader").textContent = `Signal Breakdown — ${scope}`;
+  const labels = Object.keys(bySignal), values = Object.values(bySignal);
+  if (!labels.length) {
+    el.innerHTML = `<div style="padding:20px;color:#94a3b8;font-size:.82rem;text-align:center">No signal data</div>`;
+    return;
+  }
+  await Plotly.newPlot("vdSigChart", [{
+    type: "pie", hole: 0.5,
+    domain: { x: [0.05, 0.95], y: [0.28, 1] },
+    labels, values,
+    marker: { colors: VD_SIG_PALETTE.slice(0, labels.length) },
+    textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
+    hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
+  }], { ...VD_DONUT_LAYOUT, width: VD_DONUT_W, height: VD_DONUT_H },
+  { displayModeBar: false });
+
+  el.removeAllListeners("plotly_click");
+  el.on("plotly_click", data => {
+    const signal = data.points[0].label;
+    _vdSessFilter.signal = (_vdSessFilter.signal === signal) ? null : signal;
+    _vdRefreshSessions();
+  });
+}
+
+async function _vdRenderTypeChart(sessions, scope) {
+  const el = document.getElementById("vdTypeChart");
+  if (!el) return;
+  el.innerHTML = "";
+  document.getElementById("vdTypeHeader").textContent = `Session Type — ${scope}`;
+  if (!sessions.length) {
+    el.innerHTML = `<div style="padding:20px;color:#94a3b8;font-size:.82rem;text-align:center">No sessions</div>`;
+    return;
+  }
+  const counts = {};
+  sessions.forEach(s => { const t = s.session_type||"unknown"; counts[t]=(counts[t]||0)+1; });
+  const TYPE_COLORS = { charging: "#f59e0b", discharge: "#3b82f6", idle: "#9ca3af" };
+  const labels = Object.keys(counts), values = Object.values(counts);
+  await Plotly.newPlot("vdTypeChart", [{
+    type: "pie", hole: 0.5,
+    domain: { x: [0.05, 0.95], y: [0.28, 1] },
+    labels, values,
+    marker: { colors: labels.map(l => TYPE_COLORS[l]||"#6b7280") },
+    textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
+    hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
+  }], { ...VD_DONUT_LAYOUT, width: VD_DONUT_W, height: VD_DONUT_H },
+  { displayModeBar: false });
+
+  el.removeAllListeners("plotly_click");
+  el.on("plotly_click", async data => {
+    const sessionType = data.points[0].label;
+    _vdSessFilter.sessionType = (_vdSessFilter.sessionType === sessionType) ? null : sessionType;
+    // Re-fetch signal breakdown filtered by session type + detector
+    const params = new URLSearchParams();
+    if (_vdSessFilter.detector)    params.set("detector",     _vdSessFilter.detector);
+    if (_vdSessFilter.sessionType) params.set("session_type", _vdSessFilter.sessionType);
+    const url = `/api/anomaly-breakdown/${_vdReg}/` + (params.toString() ? "?"+params : "");
+    const fd  = await fetch(url).then(r => r.json());
+    const parts = [];
+    if (_vdSessFilter.detector)    parts.push(_vdSessFilter.detector.toUpperCase());
+    if (_vdSessFilter.sessionType) parts.push(_vdSessFilter.sessionType);
+    await _vdRenderSignalChart(fd.by_signal, parts.length ? `${parts.join(" · ")} — ${_vdReg}` : _vdReg);
+    _vdRefreshSessions();
+  });
+}
+
+// ── Sessions table renderer ───────────────────────────────────────────────
+function _vdRenderSessionRows(sessions) {
+  if (!sessions.length)
+    return `<tr><td colspan="${VD_SESS_HEADERS.length}" style="text-align:center;color:#94a3b8;padding:16px;font-size:.82rem">No sessions match the current filter.</td></tr>`;
+
+  return sessions.map(s => {
+    const flagged = !!s.is_anomalous;
+    const sid     = s.session_id ?? "";
+    const cells   = VD_SESS_FIELDS.map(f => {
+      const v = s[f];
+      if (VD_SESS_BOOL.has(f)) {
+        return v ? `<td><span style="background:#fef3c7;color:#92400e;font-size:.7rem;padding:1px 5px;border-radius:3px;font-weight:600">Yes</span></td>`
+                 : `<td style="color:#cbd5e1;font-size:.75rem">—</td>`;
+      }
+      if (f === "start_time_ist" || f === "end_time_ist") return `<td style="white-space:nowrap">${v??'—'}</td>`;
+      if (f === "registration_number") return `<td><code style="font-size:.78rem">${v??'—'}</code></td>`;
+      if (f === "session_type") {
+        const label = v==="charging"?"Charging":v==="discharge"?"Discharging":(v??'—');
+        const color = v==="charging"?"#fef3c7;color:#92400e":"#eff6ff;color:#1d4ed8";
+        return `<td><span style="background:${color};font-size:.7rem;padding:1px 5px;border-radius:3px;font-weight:600">${label}</span></td>`;
+      }
+      if (f === "is_loaded") {
+        if (v==null) return "<td>—</td>";
+        return `<td>${(v==1||v===true)?"Inbound":"Outbound"}</td>`;
+      }
+      if (v==null) return "<td>—</td>";
+      if (f==="soc_start"||f==="soc_end") return `<td style="text-align:right">${Math.round(v)}%</td>`;
+      if (typeof v==="number") return `<td style="text-align:right">${v.toFixed(3)}</td>`;
+      if (typeof v==="boolean") return `<td>${v?"True":"False"}</td>`;
+      return `<td>${v}</td>`;
+    }).join("");
+
+    const startLbl = (s.start_time_ist??'').replace(/'/g,'');
+    const rowClick = sid ? `onclick="vdLoadTelemetry('${_vdReg}','${sid}','${s.session_type??''}','${startLbl}')"` : '';
+    const titleAttr = sid ? `title="Click to view raw telemetry"` : '';
+    return `<tr ${titleAttr} ${rowClick}
+      style="font-size:.78rem;${flagged?'background:#fffbeb':''}${sid?';cursor:pointer':''}">
+      ${cells}
+    </tr>`;
+  }).join("");
+}
+
+function _vdRefreshSessions() {
+  if (!_vdSessCache) return;
+  const { detector, signal, sessionType } = _vdSessFilter;
+
+  // Pre-type filter (all filters except sessionType) → feeds type chart
+  const preType = _vdApplyFilter(_vdSessCache.sessions, { excludeSessionType: true });
+  _vdRenderTypeChart(preType, _vdReg);
+
+  // Final filtered
+  const filtered = sessionType ? preType.filter(s => s.session_type === sessionType) : preType;
+
+  let filterNote = "";
+  if (detector)    filterNote += detector.toUpperCase();
+  if (signal)      filterNote += (filterNote?" · ":"")+signal;
+  if (sessionType) filterNote += (filterNote?" · ":"")+sessionType;
+  if (filterNote)  filterNote = ` <span style="color:#3b82f6;font-weight:600">[${filterNote}]</span>`;
+
+  const note = `Showing <strong>${filtered.length}</strong> anomalous sessions &nbsp;|&nbsp; ` +
+    `${_vdSessCache.total_anomalous} anomalous of ${_vdSessCache.total_sessions} total${filterNote} ` +
+    `· amber = anomalous · click a row for telemetry · click charts to filter`;
+
+  const thead = `<thead><tr>${VD_SESS_HEADERS.map(h =>
+    `<th style="background:#1e293b;color:#e2e8f0;font-size:.7rem;font-weight:600;
+     text-transform:uppercase;letter-spacing:.04em;padding:7px 8px;white-space:nowrap;
+     position:sticky;top:0;z-index:2">${h}</th>`).join("")}</tr></thead>`;
+
+  document.getElementById("vdSessContainer").innerHTML =
+    `<div style="overflow-x:auto;max-height:420px;border-radius:6px;border:1px solid #e2e8f0">
+      <table style="border-collapse:collapse;width:100%;min-width:1200px;font-size:.78rem">
+        ${thead}<tbody>${_vdRenderSessionRows(filtered)}</tbody>
+      </table>
+    </div>
+    <div style="padding:6px 4px;font-size:.72rem;color:#94a3b8;margin-top:4px">${note}</div>`;
+}
+
+// ── Section 4 orchestrator ────────────────────────────────────────────────
+async function renderVDSection4(sessData, bdData, reg, container) {
+  _vdReg        = reg;
+  _vdSessCache  = sessData;
+  _vdSessFilter = { detector: null, signal: null, sessionType: null };
+
+  const sec = document.createElement("div");
+  sec.className = "vd-section";
+  sec.innerHTML = `
+    <div class="vd-section-hdr">Alert Breakdown &amp; Anomalous Sessions</div>
+
+    <!-- Three donut charts -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px">
+      <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
+        <div id="vdDetHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Alert Source — ${reg}</div>
+        <div id="vdDetChart" style="height:${VD_DONUT_H}px;display:flex;align-items:center;justify-content:center"></div>
+      </div>
+      <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
+        <div id="vdTypeHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Session Type — ${reg}</div>
+        <div id="vdTypeChart" style="height:${VD_DONUT_H}px;display:flex;align-items:center;justify-content:center"></div>
+      </div>
+      <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
+        <div id="vdSigHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Signal Breakdown — ${reg}</div>
+        <div id="vdSigChart" style="height:${VD_DONUT_H}px;display:flex;align-items:center;justify-content:center"></div>
+      </div>
+    </div>
+
+    <!-- Sessions table -->
+    <div id="vdSessContainer">
+      <div style="text-align:center;padding:24px;color:#94a3b8">
+        <div class="spinner-border spinner-border-sm text-primary"></div>
+        <p style="margin-top:8px;font-size:.82rem">Loading sessions…</p>
+      </div>
+    </div>
+
+    <!-- Inline telemetry -->
+    <div id="vdTelSection" style="display:none;margin-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="font-size:.78rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em">
+          Session Telemetry — <span id="vdTelLabel" style="color:#3b82f6;text-transform:none;letter-spacing:0"></span>
+        </div>
+        <button onclick="document.getElementById('vdTelSection').style.display='none'"
+          style="background:none;border:1px solid #e2e8f0;border-radius:5px;padding:2px 10px;
+                 font-size:.72rem;cursor:pointer;color:#64748b">Close ✕</button>
+      </div>
+      <div id="vdTelBody"></div>
+    </div>
+  `;
+  container.appendChild(sec);
+
+  if (!sessData || !sessData.sessions) {
+    document.getElementById("vdSessContainer").innerHTML =
+      `<div style="padding:16px;color:#94a3b8;font-size:.82rem">No session data available.</div>`;
+  }
+
+  // Render charts after DOM paint
+  requestAnimationFrame(async () => {
+    if (bdData && bdData.by_detector) {
+      await _vdRenderDetectorChart(bdData.by_detector);
+
+      // Detector chart click → filter sessions + update signal chart
+      const detEl = document.getElementById("vdDetChart");
+      if (detEl) {
+        detEl.removeAllListeners("plotly_click");
+        detEl.on("plotly_click", async data => {
+          const label    = data.points[0].label;
+          const detector = label.toLowerCase().includes("isolation") ? "if" : "cusum";
+          _vdSessFilter.detector = (_vdSessFilter.detector === detector) ? null : detector;
+          _vdSessFilter.signal   = null;
+          const params = new URLSearchParams();
+          if (_vdSessFilter.detector)    params.set("detector",     _vdSessFilter.detector);
+          if (_vdSessFilter.sessionType) params.set("session_type", _vdSessFilter.sessionType);
+          const url = `/api/anomaly-breakdown/${_vdReg}/` + (params.toString() ? "?"+params : "");
+          const fd  = await fetch(url).then(r => r.json());
+          const parts = [];
+          if (_vdSessFilter.detector)    parts.push(label);
+          if (_vdSessFilter.sessionType) parts.push(_vdSessFilter.sessionType);
+          await _vdRenderSignalChart(fd.by_signal,
+            parts.length ? `${parts.join(" · ")} — ${_vdReg}` : _vdReg);
+          _vdRefreshSessions();
+        });
+      }
+
+      await _vdRenderSignalChart(bdData.by_signal, reg);
+    }
+
+    if (sessData && sessData.sessions) {
+      _vdRefreshSessions();
+    }
+  });
+}
+
+// ── Telemetry renderer (mirrors localhost loadTelemetry) ──────────────────
+async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
+  const section = document.getElementById("vdTelSection");
+  const body    = document.getElementById("vdTelBody");
+  const label   = document.getElementById("vdTelLabel");
+  const typeLabel = sessionType==="charging"?"Charging":sessionType==="discharge"?"Discharge":(sessionType||"");
+  label.textContent = `${reg} · ${startTime||sessionId} (${typeLabel})`;
+  body.innerHTML = `<div style="text-align:center;padding:24px">
+    <div class="spinner-border spinner-border-sm text-primary"></div>
+    <p style="margin-top:8px;font-size:.82rem;color:#64748b">Loading telemetry…</p></div>`;
+  section.style.display = "";
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  const d = await fetch(`/api/telemetry/${reg}/${sessionId}/`).then(r => r.json());
+  if (d.error) { body.innerHTML = `<div style="padding:12px;color:#b91c1c;font-size:.82rem">${d.error}</div>`; return; }
+  if (!d.rows||!d.rows.length) {
+    body.innerHTML = `<div style="padding:16px;color:#94a3b8;font-size:.82rem;text-align:center">No telemetry rows for this session.</div>`;
+    return;
+  }
+
+  const rows = d.rows;
+  const ts   = rows.map(r => r.ts||r.gps_time);
+  const isCharging = sessionType === "charging";
+
+  let augRows = rows;
+  if (isCharging) {
+    augRows = rows.map(r => ({
+      ...r,
+      _chg_pwr: (r.hves1_current!=null&&r.hves1_voltage_level!=null)
+        ? Math.abs(r.hves1_current*r.hves1_voltage_level)/1000 : null,
+    }));
+  }
+
+  const chartDefs = [
+    { title:"SoC (%)",           fields:[{f:"soc",color:"#3b82f6",name:"SoC"}],                          yLabel:"%" },
+    { title:"Temperature (°C)",  fields:[{f:"temperature_highest",color:"#ef4444",name:"Max"},
+                                          {f:"temperature_lowest",color:"#06b6d4",name:"Min"}],            yLabel:"°C", multi:true },
+    { title:"Cell Spread (mV)",  fields:[{f:"cell_spread",color:"#f59e0b",name:"Spread"}],                yLabel:"mV" },
+    { title:"IR (Ω)",            fields:[{f:"ir_ohm",color:"#8b5cf6",name:"IR"}],                         yLabel:"Ω", connectgaps:true },
+    { title:"Voltage Sag Flag",  fields:[{f:"_vsag",color:"#ef4444",name:"Sag"}],                         yLabel:"flag", bar:true },
+    { title:"Speed (km/h)",      fields:[{f:"speed",color:"#10b981",name:"Speed"}],                       yLabel:"km/h" },
+    { title:"Weak Subsystem #",  fields:[{f:"min_cell_voltage_subsystem_number",color:"#f97316",name:"Weak Subsys"}], yLabel:"subsys ID" },
+    { title:"Hot Subsystem #",   fields:[{f:"temperature_highest_subsystem_number",color:"#ef4444",name:"Hot Subsys"}], yLabel:"subsys ID" },
+    ...(isCharging ? [{ title:"Charging Power (kW)", fields:[{f:"_chg_pwr",color:"#0ea5e9",name:"Chg Power"}], yLabel:"kW" }] : []),
+  ];
+
+  const chartIds = chartDefs.map((_,i) => `vdTelChart_${i}`);
+  const pairs = [];
+  for (let i=0; i<chartDefs.length; i+=2) {
+    const L = chartDefs[i], R = chartDefs[i+1];
+    pairs.push(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+      <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
+        <div style="padding:6px 12px;font-size:.72rem;font-weight:600;color:#475569;background:#f8fafc;border-bottom:1px solid #e2e8f0">${L.title}</div>
+        <div id="${chartIds[i]}" style="height:180px"></div>
+      </div>
+      ${R ? `<div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
+        <div style="padding:6px 12px;font-size:.72rem;font-weight:600;color:#475569;background:#f8fafc;border-bottom:1px solid #e2e8f0">${R.title}</div>
+        <div id="${chartIds[i+1]}" style="height:180px"></div>
+      </div>` : '<div></div>'}
+    </div>`);
+  }
+  body.innerHTML = pairs.join("");
+
+  const TEL_LAYOUT = {
+    paper_bgcolor:"transparent", plot_bgcolor:"#f8fafc",
+    font:{family:"Inter, system-ui, sans-serif",size:10,color:"#475569"},
+    margin:{l:48,r:10,t:10,b:40},
+    xaxis:{gridcolor:"#e2e8f0",tickangle:-25,tickfont:{size:8.5}},
+    yaxis:{gridcolor:"#e2e8f0",tickfont:{size:9}},
+    showlegend:false,
+  };
+
+  const syncIds = [];
+  chartDefs.forEach(({fields,yLabel,multi,bar,connectgaps},i) => {
+    const id = chartIds[i];
+    const traces = fields
+      .filter(({f}) => augRows.some(r => r[f]!=null))
+      .map(({f,color,name}) => {
+        const t = { x:ts, y:augRows.map(r=>r[f]??null),
+                    type:bar?"bar":"scatter", name,
+                    hovertemplate:`%{x}<br>${name}: %{y:.3f}<extra></extra>` };
+        if (bar) t.marker={color};
+        else { t.mode="lines"; t.line={color,width:1.5}; if(connectgaps) t.connectgaps=true; }
+        return t;
+      });
+    if (!traces.length) {
+      document.getElementById(id).innerHTML =
+        `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:.8rem">No data</div>`;
+      return;
+    }
+    const layout = { ...TEL_LAYOUT, showlegend:!!(multi),
+      yaxis:{...TEL_LAYOUT.yaxis, title:{text:yLabel,font:{size:8.5}}} };
+    if (multi) layout.legend={orientation:"h",x:0.5,xanchor:"center",y:1.12,font:{size:9}};
+    Plotly.newPlot(id, traces, layout, {displayModeBar:false,responsive:true});
+    if (!bar) syncIds.push(id);
+  });
+
+  // Synchronized crosshair
+  syncIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.removeAllListeners("plotly_hover");
+    el.removeAllListeners("plotly_unhover");
+    el.on("plotly_hover", ev => {
+      const xv = ev.points[0].x;
+      const shape = [
+        {type:"line",x0:xv,x1:xv,y0:0,y1:1,yref:"paper",line:{color:"#ef4444",width:1.5,dash:"solid"}},
+        {type:"line",x0:xv,x1:xv,y0:0,y1:1,yref:"paper",line:{color:"#fbbf24",width:1.5,dash:"dot"}},
+      ];
+      syncIds.filter(i=>i!==id).forEach(oid => {
+        const oel=document.getElementById(oid);
+        if(oel) Plotly.relayout(oel,{shapes:shape});
+      });
+    });
+    el.on("plotly_unhover", () => {
+      syncIds.filter(i=>i!==id).forEach(oid => {
+        const oel=document.getElementById(oid);
+        if(oel) Plotly.relayout(oel,{shapes:[]});
+      });
+    });
+  });
+}
