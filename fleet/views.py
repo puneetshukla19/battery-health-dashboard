@@ -22,7 +22,7 @@ TELEMETRY_DB  = os.path.join(ARTIFACTS_DIR, "telemetry.db")
 ANOM_COLS = [
     "registration_number", "session_id", "start_time_ist", "end_time_ist", "start_time", "session_type",
     "soc_start", "soc_end",
-    "ekf_soh", "if_score", "if_anomaly", "if_reason",
+    "soh", "ekf_soh", "if_score", "if_anomaly", "if_reason",
     "cusum_ekf_soh_alarm", "cusum_soh_alarm", "cusum_epk_alarm",
     "cusum_heat_alarm", "cusum_spread_alarm", "cusum_spread_slope_alarm",
     "cusum_cycle_soh_alarm", "cusum_ir_slope_alarm",
@@ -58,20 +58,18 @@ ANOM_COLS = [
 COEF_HIDE = ["efc_x_days", "ir_ohm_mean", "cell_spread_mean",
              "temp_rise_rate", "vsag_rate_per_hr"]
 
-TIER1 = ["MH18BZ3195", "MH18BZ3344", "MH18BZ3028", "MH18BZ3392"]
-TIER2 = ["MH18BZ3198", "MH18BZ3341", "MH18BZ2648", "MH18BZ2689", "MH18BZ2958"]
+TIER1 = ["MH18BZ3028", "MH18BZ3392", "MH18BZ3341"]
+TIER2 = ["MH18BZ2648", "MH18BZ3198", "MH18BZ2689", "MH18BZ2958"]
 TIER3 = ["MH18BZ2649", "MH18BZ3163", "MH18BZ3345", "MH18BZ2690", "MH18BZ2647"]
 
 TIER1_SIGNALS = {
-    "MH18BZ3195": "Most urgent — RUL=99 days; steepest slope in fleet (-0.179%/day); 7 anomalies",
-    "MH18BZ3344": "RUL=112 days; slope -0.158%/day (2nd steepest); 15 anomalies (11.9%) — IF=10, CUSUM=5",
     "MH18BZ3028": "Lowest fleet SoH (94.97%); highest composite (0.658); 12 anomalies (13.2%) — IF=7, CUSUM=5",
-    "MH18BZ3392": "Slope -0.062%/day; RUL=280 days; 12 anomalies (13.6%) — IF=8, CUSUM=5",
+    "MH18BZ3392": "Slope -0.062%/day; RUL=280 days (<1 yr); composite=0.565; 12 anomalies (13.6%) — IF=8, CUSUM=5",
+    "MH18BZ3341": "3rd highest degradation score in fleet (0.514); 87 anomalies (14.2%) — IF=69, CUSUM=24; slope -0.029%/day",
 }
 TIER2_NOTES = {
+    "MH18BZ2648": "Highest raw anomaly count fleet-wide (124, 17.9%); CUSUM=51, EKF CUSUM=13; composite=0.479",
     "MH18BZ3198": "Highest EKF CUSUM in fleet (14); slope -0.044%/day; RUL=390 days; 43 anomalies (8.4%)",
-    "MH18BZ3341": "87 anomalies (14.2%); 3rd highest composite (0.514); IF=69, CUSUM=24",
-    "MH18BZ2648": "Highest anomaly count fleet-wide (124, 17.9%); CUSUM=51, EKF CUSUM=13",
     "MH18BZ2689": "61 anomalies (8.1%); composite=0.473; EKF CUSUM=7, CUSUM=27",
     "MH18BZ2958": "36 anomalies (6.7%); composite=0.464; EKF CUSUM=6, CUSUM=26",
 }
@@ -203,7 +201,16 @@ def api_fleet_trend(request):
         .reset_index()
         .rename(columns={"ekf_soh": "median_soh"})
     )
-    return JsonResponse({"trend": daily.to_dict(orient="records")})
+    total_vehicles = ekf["registration_number"].nunique()
+    coverage = (
+        ekf.groupby("date")["registration_number"]
+        .nunique()
+        .reset_index()
+        .rename(columns={"registration_number": "vehicle_count"})
+    )
+    coverage["pct"] = (coverage["vehicle_count"] / total_vehicles * 100).round(1)
+    daily = daily.merge(coverage, on="date", how="left")
+    return JsonResponse({"trend": daily.to_dict(orient="records"), "total_vehicles": total_vehicles})
 
 
 @require_GET
@@ -345,7 +352,7 @@ def api_sessions(request, reg):
         "session_id", "start_time_ist", "end_time_ist", "registration_number", "session_type",
         "soc_start", "soc_end",
         # EKF & anomaly flags
-        "ekf_soh", "duration_hr", "if_score", "if_anomaly", "if_reason",
+        "soh", "ekf_soh", "duration_hr", "if_score", "if_anomaly", "if_reason",
         "cusum_anomaly", "cusum_soh_alarm", "cusum_cycle_soh_alarm",
         "cusum_heat_alarm", "cusum_spread_alarm", "cusum_spread_slope_alarm",
         "cusum_epk_alarm", "cusum_ir_slope_alarm",

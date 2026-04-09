@@ -24,7 +24,7 @@ function fmtPeriod(first, last) {
 
 function rulToYears(days) {
   if (days == null) return "—";
-  return (days / 365.25).toFixed(2) + " yr";
+  return (days / 365.25).toFixed(2) + " years";
 }
 
 /* ─── init ───────────────────────────────────────────────────────────────────── */
@@ -93,28 +93,29 @@ function renderQuintiles() {
 function renderAnomalyTiers() {
   const d = _tiers;
 
-  const vRow = (v, signal) =>
+  const vRow = (v, signal, color) =>
     `<tr style="cursor:pointer" onclick="openVehicleDetail('${v.registration_number}')">
-      <td><code style="font-size:.8rem">${v.registration_number}</code></td>
-      <td class="small text-muted">${signal || ""}</td>
+      <td><span style="font-size:.8rem;font-weight:700;color:${color}">${v.registration_number}</span></td>
+      <td class="text-muted">${signal || ""}</td>
       <td class="text-end">${fmtPct(v.current_soh)}</td>
       <td class="text-end">${fmt(v.soh_slope, 4)}</td>
       <td class="text-end fw-bold">${fmt(v.composite, 4)}</td>
       <td class="text-end">${v.n_combined_anom}</td>
     </tr>`;
 
-  document.querySelector("#tier1Table tbody").innerHTML = d.tier1.map(v => vRow(v, v.primary_signal)).join("");
-  document.querySelector("#tier2Table tbody").innerHTML = d.tier2.map(v => vRow(v, v.note)).join("");
-  document.querySelector("#tier3Table tbody").innerHTML = d.tier3.map(v => vRow(v, v.note)).join("");
+  document.querySelector("#tier1Table tbody").innerHTML = d.tier1.map(v => vRow(v, v.primary_signal, "#dc2626")).join("");
+  document.querySelector("#tier2Table tbody").innerHTML = d.tier2.map(v => vRow(v, v.note,           "#d97706")).join("");
+  document.querySelector("#tier3Table tbody").innerHTML = d.tier3.map(v => vRow(v, v.note,           "#059669")).join("");
 }
 
 /* ─── Hover chart setup ──────────────────────────────────────────────────────── */
 const HOVER_FNS = {
-  mean_soh: chartVehicleSoh,
-  std_soh:  chartSohStdDev,
-  trend:    chartSohTrend,
-  ekf_rul:  chartVehicleRul,
-  eol:      chartEolInfo,
+  mean_soh:  chartVehicleSoh,
+  std_soh:   chartSohStdDev,
+  trend:     chartSohTrend,
+  ekf_rul:   chartVehicleRul,
+  eol:       chartEolInfo,
+  data_span: chartDataSpan,
 };
 
 function setupHoverCharts() {
@@ -150,17 +151,18 @@ function showHoverChart(type, rowEl) {
   const panelH = isText ? 180 : (isBigBar ? Math.min(maxH, Math.max(300, (_vehicles || []).length * 22 + 80)) : 300);
 
   // Position panel
+  const panelW = 480;
   let left = rect.right + 14;
-  if (left + 454 > window.innerWidth) left = rect.left - 464;
+  if (left + panelW > window.innerWidth) left = rect.left - panelW - 14;
   left = Math.max(8, left);
 
   let top = rect.top - 4;
   if (top + panelH > window.innerHeight - 8) top = Math.max(8, window.innerHeight - panelH - 8);
   top = Math.max(8, top);
 
-  panel.style.left   = left + "px";
-  panel.style.top    = top + "px";
-  panel.style.height = isText ? "auto" : "300px";
+  panel.style.left    = left + "px";
+  panel.style.top     = top + "px";
+  panel.style.height  = isText ? "auto" : panelH + "px";
   panel.style.display = "block";
 
   plotEl.style.display = isText ? "none" : "block";
@@ -195,6 +197,7 @@ function chartVehicleSoh(plotEl) {
 
   const h = Math.min(window.innerHeight - 80, Math.max(282, sorted.length * 22 + 80));
   document.getElementById("hoverPanel").style.height = h + "px";
+  document.getElementById("hoverPlot").style.height  = h + "px";
 
   Plotly.newPlot(plotEl, [{
     type: "bar",
@@ -207,7 +210,7 @@ function chartVehicleSoh(plotEl) {
     ...baseLayout("Vehicle EKF SoH — high to low"),
     height: h,
     xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } }, range: [93, 100] },
-    yaxis: { tickfont: { family: "Inter, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
+    yaxis: { tickfont: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
     margin: { t: 34, b: 40, l: 110, r: 14 },
   }, cfg());
 }
@@ -251,18 +254,18 @@ function chartSohStdDev(plotEl) {
       {
         x: mu, y: 0.98, xref: "x", yref: "paper",
         text: `µ=${mu.toFixed(3)}%`, showarrow: false,
-        font: { size: 8.5, color: "#1e293b", family: "Inter" },
+        font: { size: 8.5, color: "#1e293b", family: "Plus Jakarta Sans" },
         bgcolor: "rgba(255,255,255,0.8)", borderpad: 2,
       },
       {
         x: lo, y: 0.5, xref: "x", yref: "paper",
         text: "−1.96σ", showarrow: false,
-        font: { size: 8, color: "#64748b", family: "Inter" },
+        font: { size: 8, color: "#64748b", family: "Plus Jakarta Sans" },
       },
       {
         x: hi, y: 0.5, xref: "x", yref: "paper",
         text: "+1.96σ", showarrow: false,
-        font: { size: 8, color: "#64748b", family: "Inter" },
+        font: { size: 8, color: "#64748b", family: "Plus Jakarta Sans" },
       },
     ],
   }, cfg());
@@ -281,36 +284,33 @@ function rollingMedian(arr, win) {
 
 /* ─── Chart: SoH trend line ──────────────────────────────────────────────────── */
 function chartSohTrend(plotEl) {
-  const first = _overview.first_soh;
-  const last  = _overview.last_soh;
-  if (first == null || last == null) return;
+  if (!_trend || !_trend.length) return;
 
-  const slope = _overview.soh_trend_pct;
-  const sign  = slope >= 0 ? "+" : "";
-  const lineColor = last < first ? "#ef4444" : "#22c55e";
+  const dates  = _trend.map(r => r.date);
+  const sohs   = _trend.map(r => r.median_soh);
+  const first  = sohs[0];
+  const last   = sohs[sohs.length - 1];
+  const slope  = _overview.soh_trend_pct;
+  const sign   = slope >= 0 ? "+" : "";
+  const lineColor = last < first ? "#ef4444" : "#3b82f6";
+  const fillColor = last < first ? "rgba(239,68,68,0.08)" : "rgba(59,130,246,0.08)";
+
+  const minY = Math.min(...sohs);
+  const maxY = Math.max(...sohs);
+  const pad  = Math.max((maxY - minY) * 0.3, 0.05);
 
   Plotly.newPlot(plotEl, [
     {
       type: "scatter", mode: "lines",
-      x: [_overview.first_date, _overview.last_date],
-      y: [first, last],
-      line: { color: lineColor, width: 2.5 },
-      hovertemplate: "%{x}<br>SoH: %{y:.3f}%<extra></extra>",
-    },
-    {
-      type: "scatter", mode: "markers+text",
-      x: [_overview.first_date, _overview.last_date],
-      y: [first, last],
-      marker: { color: ["#22c55e", lineColor], size: 7 },
-      text: [`${first.toFixed(2)}%`, `${last.toFixed(2)}%`],
-      textposition: ["middle right", "middle left"],
-      textfont: { size: 9, color: "#1e293b" },
-      hoverinfo: "skip",
-      showlegend: false,
+      x: dates, y: sohs,
+      line: { color: lineColor, width: 2, shape: "spline", smoothing: 0.8 },
+      fill: "tonexty", fillcolor: fillColor,
+      hovertemplate: "%{x}<br>Fleet median SoH: %{y:.3f}%<extra></extra>",
+      name: "Fleet median SoH",
     },
   ], {
     ...baseLayout(`Fleet SoH Trend   ${sign}${slope.toFixed(2)}% over ${_overview.span_days} days`),
-    yaxis: { ...yAx("EKF SoH (%)") },
+    yaxis: { ...yAx("EKF SoH (%)"), range: [minY - pad, maxY + pad] },
     xaxis: { ...xAx() },
   }, cfg());
 }
@@ -335,6 +335,7 @@ function chartVehicleRul(plotEl) {
 
   const h = Math.min(window.innerHeight - 80, Math.max(282, sorted.length * 22 + 80));
   document.getElementById("hoverPanel").style.height = h + "px";
+  document.getElementById("hoverPlot").style.height  = h + "px";
 
   Plotly.newPlot(plotEl, [{
     type: "bar",
@@ -347,7 +348,7 @@ function chartVehicleRul(plotEl) {
     ...baseLayout("EKF RUL per vehicle — high to low"),
     height: h,
     xaxis: { ...xAx(), title: { text: "RUL (years)", font: { size: 9 } } },
-    yaxis: { tickfont: { family: "Inter, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
+    yaxis: { tickfont: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
     margin: { t: 34, b: 40, l: 110, r: 14 },
   }, cfg());
 }
@@ -380,8 +381,38 @@ function chartEolInfo(plotEl, textEl) {
   `;
 }
 
+async function chartDataSpan(plotEl, textEl) {
+  const d = await fetch("/api/fleet-trend/").then(r => r.json());
+  const trend = d.trend || [];
+  if (!trend.length) { textEl.innerHTML = `<div style="padding:16px;color:#94a3b8">No data.</div>`; return; }
+
+  const dates  = trend.map(r => r.date);
+  const pcts   = trend.map(r => r.pct ?? 0);
+  const counts = trend.map(r => r.vehicle_count ?? 0);
+  const total  = d.total_vehicles ?? 1;
+
+  const h = 360;
+  document.getElementById("hoverPanel").style.height = h + "px";
+  plotEl.style.height = h + "px";
+
+  Plotly.newPlot(plotEl, [{
+    type: "bar", x: dates, y: pcts,
+    marker: { color: pcts.map(p => p >= 80 ? "#22c55e" : p >= 40 ? "#f59e0b" : "#ef4444") },
+    hovertemplate: "%{x}<br>%{customdata} / " + total + " vehicles (%{y:.1f}%)<extra></extra>",
+    customdata: counts,
+  }], {
+    paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 9.5, color: "#475569" },
+    margin: { l: 44, r: 10, t: 10, b: 70 },
+    height: h,
+    xaxis: { gridcolor: "#e2e8f0", tickangle: -40, tickfont: { size: 8.5 } },
+    yaxis: { gridcolor: "#e2e8f0", range: [0, 105], title: { text: "% fleet", font: { size: 9 } } },
+    showlegend: false,
+  }, { displayModeBar: false, responsive: false });
+}
+
 /* ─── Plotly layout helpers ──────────────────────────────────────────────────── */
-const FONT = { family: "Inter, system-ui, sans-serif", size: 10, color: "#475569" };
+const FONT = { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" };
 
 function baseLayout(title) {
   return {
@@ -757,7 +788,7 @@ function renderVDSection2(d, vehicle, container) {
 
     Plotly.newPlot(chartId, traces, {
       paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
-      font: { family: "Inter, system-ui, sans-serif", size: 11, color: "#475569" },
+      font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 11, color: "#475569" },
       margin: { l: 55, r: 20, t: 20, b: 55 },
       xaxis: { title: "Date", gridcolor: "#e2e8f0", tickangle: -30 },
       yaxis: { title: "SoH (%)", gridcolor: "#e2e8f0", range: [yMin, yMax] },
@@ -841,7 +872,7 @@ function _renderCoefBar(divId, coefObj, color) {
     hovertemplate: "%{y}<br>coef: %{x:.6f}<extra></extra>",
   }], {
     paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
-    font: { family: "Inter, system-ui, sans-serif", size: 10, color: "#475569" },
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
     height: h,
     margin: { l: 170, r: 16, t: 16, b: 36 },
     xaxis: { title: "Coefficient value", gridcolor: "#e2e8f0", tickfont: { size: 9 },
@@ -896,7 +927,7 @@ function generateCompositeAnalysis(vehicle) {
 
 // ── Session table constants (mirrors dashboard.js) ────────────────────────
 const VD_SESS_HEADERS = [
-  "Vehicle","Start","End","Type","Start SoC","End SoC","EKF SoH","Duration (hrs)",
+  "Vehicle","Start","End","Type","Start SoC","End SoC","BMS SoH","EKF SoH","Duration (hrs)",
   "IF Score","IF Anomaly","CUSUM Anomaly","Degr. Score","Reason","Flagged",
   "V-Sags","IR Mean","Spread","Energy/km","Energy KWh","Low SOC",
   "Ref Cap AH","Voltage","Current","Cap AH Dischrg.","Cap AH Chrg.","Cap AH Plugin",
@@ -911,7 +942,7 @@ const VD_SESS_HEADERS = [
   "Cell Health","Cell Undervolt","Cell Overvolt","Rapid Heat","High E/km","Slow Chg","Fast Chg",
 ];
 const VD_SESS_FIELDS = [
-  "registration_number","start_time_ist","end_time_ist","session_type","soc_start","soc_end","ekf_soh","duration_hr",
+  "registration_number","start_time_ist","end_time_ist","session_type","soc_start","soc_end","soh","ekf_soh","duration_hr",
   "if_score","if_anomaly","cusum_anomaly","composite_degradation_score","anomaly_reason","is_anomalous",
   "n_vsag","ir_ohm_mean","cell_spread_mean","energy_per_km","energy_kwh","n_low_soc",
   "ref_capacity_ah","voltage_mean_new","current_mean_new","capacity_ah_discharge_new","capacity_ah_charge_new","capacity_ah_plugin_new",
@@ -981,12 +1012,12 @@ function _vdApplyFilter(sessions, { excludeSessionType = false } = {}) {
 const VD_DONUT_W = 286, VD_DONUT_H = 286;
 const VD_DONUT_LAYOUT = {
   paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
-  font: { family: "Inter, system-ui, sans-serif", size: 10, color: "#475569" },
+  font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
   margin: { l: 10, r: 10, t: 10, b: 10 },
   showlegend: true,
-  legend: { orientation: "h", x: 0.5, xanchor: "center", y: 0.04, font: { size: 9 }, tracegroupgap: 2 },
+  legend: { orientation: "v", x: 0.72, xanchor: "left", y: 0.5, yanchor: "middle", font: { size: 8.5 }, tracegroupgap: 4 },
 };
-const VD_SIG_PALETTE = ["#ef4444","#f97316","#eab308","#10b981","#06b6d4","#8b5cf6","#3b82f6","#64748b"];
+const VD_SIG_PALETTE = ["#6366f1","#0ea5e9","#10b981","#f59e0b","#ec4899","#8b5cf6","#14b8a6","#94a3b8"];
 
 async function _vdRenderDetectorChart(byDetector) {
   const el = document.getElementById("vdDetChart");
@@ -994,9 +1025,9 @@ async function _vdRenderDetectorChart(byDetector) {
   el.innerHTML = "";
   await Plotly.newPlot("vdDetChart", [{
     type: "pie", hole: 0.5,
-    domain: { x: [0.05, 0.95], y: [0.28, 1] },
+    domain: { x: [0.0, 0.68], y: [0.05, 0.95] },
     labels: Object.keys(byDetector), values: Object.values(byDetector),
-    marker: { colors: ["#3b82f6","#f59e0b"] },
+    marker: { colors: ["#6366f1","#0ea5e9"] },
     textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
     hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
   }], { ...VD_DONUT_LAYOUT, width: VD_DONUT_W, height: VD_DONUT_H },
@@ -1015,7 +1046,7 @@ async function _vdRenderSignalChart(bySignal, scope) {
   }
   await Plotly.newPlot("vdSigChart", [{
     type: "pie", hole: 0.5,
-    domain: { x: [0.05, 0.95], y: [0.28, 1] },
+    domain: { x: [0.0, 0.68], y: [0.05, 0.95] },
     labels, values,
     marker: { colors: VD_SIG_PALETTE.slice(0, labels.length) },
     textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
@@ -1042,13 +1073,16 @@ async function _vdRenderTypeChart(sessions, scope) {
   }
   const counts = {};
   sessions.forEach(s => { const t = s.session_type||"unknown"; counts[t]=(counts[t]||0)+1; });
-  const TYPE_COLORS = { charging: "#f59e0b", discharge: "#3b82f6", idle: "#9ca3af" };
-  const labels = Object.keys(counts), values = Object.values(counts);
+  const TYPE_COLORS    = { charging: "#f59e0b", discharge: "#6366f1", idle: "#94a3b8" };
+  const TYPE_LABELS    = { charging: "Charging", discharge: "Discharging", idle: "Idle" };
+  const rawKeys = Object.keys(counts);
+  const labels  = rawKeys.map(k => TYPE_LABELS[k] || k.charAt(0).toUpperCase() + k.slice(1));
+  const values  = Object.values(counts);
   await Plotly.newPlot("vdTypeChart", [{
     type: "pie", hole: 0.5,
-    domain: { x: [0.05, 0.95], y: [0.28, 1] },
+    domain: { x: [0.0, 0.68], y: [0.05, 0.95] },
     labels, values,
-    marker: { colors: labels.map(l => TYPE_COLORS[l]||"#6b7280") },
+    marker: { colors: rawKeys.map(l => TYPE_COLORS[l]||"#6b7280") },
     textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
     hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
   }], { ...VD_DONUT_LAYOUT, width: VD_DONUT_W, height: VD_DONUT_H },
@@ -1087,7 +1121,7 @@ function _vdRenderSessionRows(sessions) {
                  : `<td style="color:#cbd5e1;font-size:.75rem">—</td>`;
       }
       if (f === "start_time_ist" || f === "end_time_ist") return `<td style="white-space:nowrap">${v??'—'}</td>`;
-      if (f === "registration_number") return `<td><code style="font-size:.78rem">${v??'—'}</code></td>`;
+      if (f === "registration_number") return `<td><span style="font-size:.78rem;font-weight:600">${v??'—'}</span></td>`;
       if (f === "session_type") {
         const label = v==="charging"?"Charging":v==="discharge"?"Discharging":(v??'—');
         const color = v==="charging"?"#fef3c7;color:#92400e":"#eff6ff;color:#1d4ed8";
@@ -1098,8 +1132,8 @@ function _vdRenderSessionRows(sessions) {
         return `<td>${(v==1||v===true)?"Inbound":"Outbound"}</td>`;
       }
       if (v==null) return "<td>—</td>";
-      if (f==="soc_start"||f==="soc_end") return `<td style="text-align:right">${Math.round(v)}%</td>`;
-      if (typeof v==="number") return `<td style="text-align:right">${v.toFixed(3)}</td>`;
+      if (f==="soc_start"||f==="soc_end") return `<td>${Math.round(v)}%</td>`;
+      if (typeof v==="number") return `<td>${v.toFixed(3)}</td>`;
       if (typeof v==="boolean") return `<td>${v?"True":"False"}</td>`;
       return `<td>${v}</td>`;
     }).join("");
@@ -1108,7 +1142,7 @@ function _vdRenderSessionRows(sessions) {
     const rowClick = sid ? `onclick="vdLoadTelemetry('${_vdReg}','${sid}','${s.session_type??''}','${startLbl}')"` : '';
     const titleAttr = sid ? `title="Click to view raw telemetry"` : '';
     return `<tr ${titleAttr} ${rowClick}
-      style="font-size:.78rem;${flagged?'background:#fffbeb':''}${sid?';cursor:pointer':''}">
+      style="font-size:.72rem;${flagged?'background:#fffbeb':''}${sid?';cursor:pointer':''}">
       ${cells}
     </tr>`;
   }).join("");
@@ -1136,13 +1170,13 @@ function _vdRefreshSessions() {
     `· amber = anomalous · click a row for telemetry · click charts to filter`;
 
   const thead = `<thead><tr>${VD_SESS_HEADERS.map(h =>
-    `<th style="background:#1e293b;color:#e2e8f0;font-size:.7rem;font-weight:600;
-     text-transform:uppercase;letter-spacing:.04em;padding:7px 8px;white-space:nowrap;
-     position:sticky;top:0;z-index:2">${h}</th>`).join("")}</tr></thead>`;
+    `<th style="background:#f8fafc;color:#475569;font-size:.7rem;font-weight:600;
+     text-transform:uppercase;letter-spacing:.04em;padding:8px 16px;white-space:nowrap;
+     border-bottom:1px solid #e2e8f0;position:sticky;top:0;z-index:2">${h}</th>`).join("")}</tr></thead>`;
 
   document.getElementById("vdSessContainer").innerHTML =
     `<div style="overflow-x:auto;max-height:420px;border-radius:6px;border:1px solid #e2e8f0">
-      <table style="border-collapse:collapse;width:100%;min-width:1200px;font-size:.78rem">
+      <table class="table table-sm table-bordered summary-table" style="border-collapse:collapse;width:100%;min-width:1200px;margin-bottom:0">
         ${thead}<tbody>${_vdRenderSessionRows(filtered)}</tbody>
       </table>
     </div>
@@ -1159,6 +1193,28 @@ async function renderVDSection4(sessData, bdData, reg, container) {
   sec.className = "vd-section";
   sec.innerHTML = `
     <div class="vd-section-hdr">Alert Breakdown &amp; Anomalous Sessions</div>
+
+    <!-- Detector descriptions -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+      <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px">
+        <div style="font-size:.72rem;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Isolation Forest (IF)</div>
+        <div style="font-size:.75rem;color:#334155;line-height:1.5">
+          A tree-based unsupervised algorithm that isolates anomalies by randomly partitioning features.
+          Anomalies — being rare and extreme — are isolated in fewer splits. Catches
+          <strong>multivariate outliers</strong>: unusual combinations of SoC, current, temperature, cell spread, and IR
+          that don't stand out on any single signal but collectively indicate abnormal session behaviour.
+        </div>
+      </div>
+      <div style="background:#fdf4ff;border:1px solid #e9d5ff;border-radius:8px;padding:10px 14px">
+        <div style="font-size:.72rem;font-weight:700;color:#7e22ce;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">CUSUM (Cumulative Sum)</div>
+        <div style="font-size:.75rem;color:#334155;line-height:1.5">
+          A sequential statistical test that accumulates deviations from a reference mean over time.
+          When the cumulative sum exceeds a threshold, a shift is flagged. Catches
+          <strong>sustained directional drift</strong>: gradual degradation in cell spread, IR rise, temperature creep,
+          or SoC anomalies that persist across multiple sessions rather than spiking once.
+        </div>
+      </div>
+    </div>
 
     <!-- Three donut charts -->
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px">
@@ -1306,7 +1362,7 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
 
   const TEL_LAYOUT = {
     paper_bgcolor:"transparent", plot_bgcolor:"#f8fafc",
-    font:{family:"Inter, system-ui, sans-serif",size:10,color:"#475569"},
+    font:{family:"Plus Jakarta Sans, system-ui, sans-serif",size:10,color:"#475569"},
     margin:{l:48,r:10,t:10,b:40},
     xaxis:{gridcolor:"#e2e8f0",tickangle:-25,tickfont:{size:8.5}},
     yaxis:{gridcolor:"#e2e8f0",tickfont:{size:9}},

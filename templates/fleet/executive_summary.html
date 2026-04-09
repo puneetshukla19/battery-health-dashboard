@@ -6,8 +6,9 @@
   <title>Fleet Battery Health — Executive Summary</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <style>
@@ -18,7 +19,7 @@
       --card-shadow: 0 1px 3px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.06);
       --card-radius: 10px;
     }
-    * { font-family: 'Inter', system-ui, sans-serif; }
+    * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
     body { background: #f1f5f9; font-size: 0.875rem; color: #1e293b; }
 
     /* ── Loading overlay ── */
@@ -67,9 +68,10 @@
     .kpi-card {
       background: #fff; border-radius: var(--card-radius);
       box-shadow: var(--card-shadow);
-      padding: 14px 12px 10px;
+      padding: 18px 14px 14px;
       position: relative; overflow: hidden;
       transition: transform .15s, box-shadow .15s;
+      min-height: 110px; display: flex; flex-direction: column; justify-content: center; gap: 6px; align-items: center; text-align: center;
     }
     .kpi-card:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,.1); }
     .kpi-card::before {
@@ -79,9 +81,11 @@
     .kpi-card.kpi-accent::before {
       background: linear-gradient(90deg, #0369a1, #0ea5e9);
     }
-    .kpi-label { font-size: 0.72rem; font-weight: 500; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
-    .kpi-value { font-size: 1.55rem; font-weight: 700; color: #0f172a; line-height: 1; }
-    .kpi-value.sm { font-size: 1.1rem; }
+    .kpi-header { display: flex; align-items: center; justify-content: center; gap: 7px; margin-bottom: 0; }
+    .kpi-icon { font-size: 1.4rem; color: #3b82f6; opacity: .85; flex-shrink: 0; }
+    .kpi-label { font-size: 0.72rem; font-weight: 500; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; margin: 0; }
+    .kpi-value { font-size: 1.25rem; font-weight: 700; color: #0f172a; line-height: 1; text-align: center; }
+    .kpi-value.sm { font-size: 1.25rem; }
 
     /* ── Generic card ── */
     .panel {
@@ -112,6 +116,7 @@
     .table td { padding: 7px 10px; vertical-align: middle; border-bottom: 1px solid #f1f5f9; }
 
     /* Summary table */
+    .summary-table td { padding: 8px 16px; }
     .summary-table td:first-child { color: #64748b; font-weight: 500; }
     .summary-table td:last-child { font-weight: 600; color: #0f172a; text-align: right; }
     .summary-table tr:last-child td { border-bottom: none; }
@@ -122,8 +127,21 @@
       font-size: 0.65rem; color: #93c5fd; margin-left: 4px;
     }
 
-    /* Quintile table */
-    #quintileTable thead th { position: static; }
+    /* Tier + Quintile tables — light header matching panel-hdr style */
+    #quintileTable thead th,
+    #tier1Table thead th,
+    #tier2Table thead th,
+    #tier3Table thead th {
+      position: static;
+      background: #f8fafc;
+      color: #475569;
+      font-weight: 600;
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      border-bottom: 1px solid #e2e8f0;
+      padding: 9px 16px;
+    }
 
     /* ── Accordion (tiers) ── */
     .accordion-item {
@@ -146,20 +164,20 @@
       padding: 8px 12px; margin: 0 12px 8px;
       border-radius: 0 4px 4px 0;
     }
-    .tier-note-1 { border-left: 3px solid #dc2626; }
-    .tier-note-2 { border-left: 3px solid #d97706; }
-    .tier-note-3 { border-left: 3px solid #10b981; }
+    .tier-note-1 { color: #dc2626; }
+    .tier-note-2 { color: #d97706; }
+    .tier-note-3 { color: #059669; }
 
     /* ── Hover chart panel ── */
     #hoverPanel {
       position: fixed;
-      width: 450px;
+      width: 480px;
       background: #fff;
       border-radius: var(--card-radius);
       box-shadow: 0 8px 32px rgba(0,0,0,.20), 0 2px 8px rgba(0,0,0,.10);
       z-index: 2000;
       display: none;
-      overflow-y: auto;
+      overflow: hidden;
       border: 1px solid #e2e8f0;
     }
     #hoverText { display: none; }
@@ -255,28 +273,46 @@
   <!-- ── KPI Cards ───────────────────────────────────────────────────────── -->
   <div class="kpi-grid mt-3">
     <div class="kpi-card kpi-accent">
-      <div class="kpi-label">SPV</div>
-      <div class="kpi-value sm">ULTRATECH</div>
+      <div class="kpi-header">
+        <i class="bi bi-buildings kpi-icon"></i>
+        <div class="kpi-label">SPV</div>
+      </div>
+      <div class="kpi-value">ULTRATECH</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Vehicles</div>
+      <div class="kpi-header">
+        <i class="bi bi-bus-front kpi-icon"></i>
+        <div class="kpi-label">Vehicles</div>
+      </div>
       <div class="kpi-value" id="kpiVehicles">—</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Mean EKF SoH</div>
+      <div class="kpi-header">
+        <i class="bi bi-battery-half kpi-icon"></i>
+        <div class="kpi-label">Mean EKF SoH</div>
+      </div>
       <div class="kpi-value" id="kpiMeanSoh">—</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">SoH Std Dev</div>
+      <div class="kpi-header">
+        <i class="bi bi-activity kpi-icon"></i>
+        <div class="kpi-label">SoH Std Dev</div>
+      </div>
       <div class="kpi-value" id="kpiStdSoh">—</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Median EKF RUL</div>
-      <div class="kpi-value sm" id="kpiEkfRul">—</div>
+      <div class="kpi-header">
+        <i class="bi bi-hourglass-split kpi-icon"></i>
+        <div class="kpi-label">Median EKF RUL</div>
+      </div>
+      <div class="kpi-value" id="kpiEkfRul">—</div>
     </div>
     <div class="kpi-card">
-      <div class="kpi-label">Analysis Period</div>
-      <div class="kpi-value sm" id="kpiPeriod">—</div>
+      <div class="kpi-header">
+        <i class="bi bi-calendar-range kpi-icon"></i>
+        <div class="kpi-label">Analysis Period</div>
+      </div>
+      <div class="kpi-value" id="kpiPeriod">—</div>
     </div>
   </div>
 
@@ -291,15 +327,15 @@
           <table class="table summary-table">
             <tbody>
               <tr data-hover="mean_soh">
-                <td>Fleet mean EKF SoH</td>
+                <td>Fleet Mean EKF SoH</td>
                 <td id="ht_meanSoh">—</td>
               </tr>
               <tr data-hover="std_soh">
-                <td>Fleet SoH std dev</td>
+                <td>Fleet SoH Std Dev</td>
                 <td id="ht_stdSoh">—</td>
               </tr>
               <tr data-hover="trend">
-                <td>SoH trend over data span</td>
+                <td>SoH Trend Over Data Span</td>
                 <td id="ht_trend">—</td>
               </tr>
               <tr data-hover="ekf_rul">
@@ -307,11 +343,11 @@
                 <td id="ht_ekfRul">—</td>
               </tr>
               <tr data-hover="eol">
-                <td>EoL SoH threshold</td>
+                <td>EoL SoH Threshold</td>
                 <td id="ht_eol">—</td>
               </tr>
-              <tr>
-                <td>Data span</td>
+              <tr data-hover="data_span">
+                <td>Data Span</td>
                 <td id="ht_span">—</td>
               </tr>
             </tbody>
@@ -325,7 +361,7 @@
       <div class="panel h-100">
         <div class="panel-hdr">Median SoH by Usage Age (quintiles)</div>
         <div class="panel-body">
-          <table class="table" id="quintileTable">
+          <table class="table summary-table" id="quintileTable">
             <thead>
               <tr>
                 <th>Quintile (days since first session)</th>
@@ -348,7 +384,7 @@
       <h2 class="accordion-header">
         <button class="accordion-button tier1-btn" type="button"
                 data-bs-toggle="collapse" data-bs-target="#tier1Panel">
-          🔴&nbsp; TIER 1 — IMMEDIATE ATTENTION (4 vehicles)
+          🔴&nbsp; TIER 1 — IMMEDIATE ATTENTION (3 vehicles)
         </button>
       </h2>
       <div id="tier1Panel" class="accordion-collapse collapse show">
@@ -357,14 +393,14 @@
             These vehicles require immediate action — they are either already significantly degraded or are declining fast enough that intervention is needed in the near term.
           </div>
           <div class="table-scroll" style="max-height:280px">
-            <table class="table table-sm mb-0" id="tier1Table">
+            <table class="table table-sm table-bordered mb-0 summary-table" id="tier1Table">
               <thead>
                 <tr>
                   <th>Vehicle</th>
                   <th>Primary Signal</th>
                   <th class="text-end">SoH (%)</th>
                   <th class="text-end">Slope (%/d)</th>
-                  <th class="text-end">Composite</th>
+                  <th class="text-end">Degr. Score</th>
                   <th class="text-end">Anomalies</th>
                 </tr>
               </thead>
@@ -379,7 +415,7 @@
       <h2 class="accordion-header">
         <button class="accordion-button collapsed tier2-btn" type="button"
                 data-bs-toggle="collapse" data-bs-target="#tier2Panel">
-          🟡&nbsp; TIER 2 — MONITOR CLOSELY (5 vehicles)
+          🟡&nbsp; TIER 2 — MONITOR CLOSELY (4 vehicles)
         </button>
       </h2>
       <div id="tier2Panel" class="accordion-collapse collapse">
@@ -388,14 +424,14 @@
             These vehicles have multiple alarms firing across IF and CUSUM detectors, indicating a meaningful degradation trajectory. They are not yet critical but warrant close monitoring and scheduled inspection.
           </div>
           <div class="table-scroll" style="max-height:280px">
-            <table class="table table-sm mb-0" id="tier2Table">
+            <table class="table table-sm table-bordered mb-0 summary-table" id="tier2Table">
               <thead>
                 <tr>
                   <th>Vehicle</th>
                   <th>Note</th>
                   <th class="text-end">SoH (%)</th>
                   <th class="text-end">Slope (%/d)</th>
-                  <th class="text-end">Composite</th>
+                  <th class="text-end">Degr. Score</th>
                   <th class="text-end">Anomalies</th>
                 </tr>
               </thead>
@@ -419,14 +455,14 @@
             These vehicles show anomaly flags (elevated CUSUM counts or isolated IF events) but have low composite degradation scores and near-flat SoH slopes. They require periodic monitoring but no immediate action.
           </div>
           <div class="table-scroll" style="max-height:280px">
-            <table class="table table-sm mb-0" id="tier3Table">
+            <table class="table table-sm table-bordered mb-0 summary-table" id="tier3Table">
               <thead>
                 <tr>
                   <th>Vehicle</th>
                   <th>Note</th>
                   <th class="text-end">SoH (%)</th>
                   <th class="text-end">Slope (%/d)</th>
-                  <th class="text-end">Composite</th>
+                  <th class="text-end">Degr. Score</th>
                   <th class="text-end">Anomalies</th>
                 </tr>
               </thead>
@@ -457,11 +493,11 @@
 
 <!-- ── Hover chart panel (global, hidden) ─────────────────────────────────── -->
 <div id="hoverPanel">
-  <div id="hoverPlot" style="width:450px;height:290px"></div>
+  <div id="hoverPlot" style="width:100%;height:100%"></div>
   <div id="hoverText"></div>
 </div>
 
 {% load static %}
-<script src="{% static 'fleet/executive_summary.js' %}?v=5"></script>
+<script src="{% static 'fleet/executive_summary.js' %}?v=25"></script>
 </body>
 </html>
