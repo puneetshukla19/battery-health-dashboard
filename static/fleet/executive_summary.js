@@ -30,12 +30,14 @@ function rulToYears(days) {
 /* ─── init ───────────────────────────────────────────────────────────────────── */
 async function init() {
   try {
-    const [ov, veh, trend, quint, tiers] = await Promise.all([
+    const [ov, veh, trend, quint, tiers, scatter, coef] = await Promise.all([
       fetch("/api/overview/").then(r => r.json()),
       fetch("/api/vehicles/").then(r => r.json()),
       fetch("/api/fleet-trend/").then(r => r.json()),
       fetch("/api/quintiles/").then(r => r.json()),
       fetch("/api/anomaly-tiers/").then(r => r.json()),
+      fetch("/api/soh-scatter/").then(r => r.json()),
+      fetch("/api/bayes-coef/").then(r => r.json()),
     ]);
 
     _overview  = ov;
@@ -46,9 +48,15 @@ async function init() {
 
     renderKPICards();
     renderFleetHealth();
+    renderSohScatter(scatter);
     renderQuintiles();
+    renderBayesCoef(coef);
     renderAnomalyTiers();
     setupHoverCharts();
+    // Initialise Bootstrap tooltips (Popper.js-based — not clipped by overflow containers)
+    document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el =>
+      new bootstrap.Tooltip(el, { trigger: "hover", placement: "top" })
+    );
   } catch (e) {
     console.error("executive_summary init failed:", e);
   } finally {
@@ -59,23 +67,34 @@ async function init() {
 /* ─── KPI cards ──────────────────────────────────────────────────────────────── */
 function renderKPICards() {
   const o = _overview;
-  document.getElementById("kpiVehicles").textContent = o.n_vehicles;
-  document.getElementById("kpiMeanSoh").textContent  = fmtPct(o.fleet_mean_soh);
-  document.getElementById("kpiStdSoh").textContent   = fmtPct(o.fleet_std_soh);
-  document.getElementById("kpiEkfRul").textContent   = rulToYears(o.median_ekf_rul);
-  document.getElementById("kpiPeriod").textContent   = fmtPeriod(o.first_date, o.last_date);
+  document.getElementById("kpiPeriod").textContent       = fmtPeriod(o.first_date, o.last_date);
+  document.getElementById("kpiVehicles").textContent     = o.n_vehicles;
+  document.getElementById("kpiMeanSoh").textContent      = fmtPct(o.fleet_mean_soh);
+  document.getElementById("kpiStdSoh").textContent       = fmtPct(o.fleet_std_soh);
+  document.getElementById("kpiEkfRul").textContent       = rulToYears(o.median_ekf_rul);
+  document.getElementById("kpiRemainingEfc").textContent = o.fleet_median_remaining_efc != null
+    ? Math.round(o.fleet_median_remaining_efc).toLocaleString() + " EFC" : "—";
 }
 
 /* ─── Fleet Health table ─────────────────────────────────────────────────────── */
 function renderFleetHealth() {
   const o = _overview;
-  document.getElementById("ht_meanSoh").textContent = fmtPct(o.fleet_mean_soh);
-  document.getElementById("ht_stdSoh").textContent  = fmtPct(o.fleet_std_soh);
+  document.getElementById("ht_span").textContent       = `${o.span_days} days`;
+  document.getElementById("ht_meanSoh").textContent    = fmtPct(o.fleet_mean_soh);
+  document.getElementById("ht_stdSoh").textContent     = fmtPct(o.fleet_std_soh);
   const sign = o.soh_trend_pct >= 0 ? "+" : "";
-  document.getElementById("ht_trend").textContent   = `${sign}${fmt(o.soh_trend_pct, 2)}%`;
-  document.getElementById("ht_ekfRul").textContent  = rulToYears(o.median_ekf_rul);
-  document.getElementById("ht_eol").textContent     = `${o.eol_threshold}%`;
-  document.getElementById("ht_span").textContent    = "95 days";
+  document.getElementById("ht_trend").textContent      = `${sign}${fmt(o.soh_trend_pct, 2)}%`;
+  const total = o.total_sessions;
+  document.getElementById("ht_population").textContent = total != null
+    ? `${total.toLocaleString()} sessions` : "—";
+  document.getElementById("ht_ekfRul").textContent     = rulToYears(o.median_ekf_rul);
+  if (o.ekf_rul_p25 != null && o.ekf_rul_p75 != null) {
+    document.getElementById("ht_rulCi").textContent =
+      `${rulToYears(o.ekf_rul_p25)} – ${rulToYears(o.ekf_rul_p75)}`;
+  } else {
+    document.getElementById("ht_rulCi").textContent = "—";
+  }
+  document.getElementById("ht_eol").textContent        = `${o.eol_threshold}%`;
 }
 
 /* ─── Quintile table ─────────────────────────────────────────────────────────── */
@@ -87,6 +106,77 @@ function renderQuintiles() {
         <td class="text-end">${fmt(q.median_soh, 2)}%</td>
       </tr>`
     ).join("");
+}
+
+/* ─── BMS SoH vs EKF SoH scatter ────────────────────────────────────────────── */
+function renderSohScatter(data) {
+  const el = document.getElementById("sohScatterPlot");
+  if (!el || !data || !data.points || !data.points.length) return;
+
+  const pts = data.points;
+  const allX = pts.map(p => p.soh).filter(v => v != null);
+  const allY = pts.map(p => p.ekf_soh).filter(v => v != null);
+  const lo = Math.min(...allX, ...allY);
+  const hi = Math.max(...allX, ...allY);
+
+  Plotly.newPlot(el, [
+    // Fleet-wide single trace
+    { type: "scatter", mode: "markers",
+      x: pts.map(p => p.soh),
+      y: pts.map(p => p.ekf_soh),
+      marker: { color: "#3b82f6", size: 3.5, opacity: 0.45 },
+      hovertemplate: "BMS SoH: %{x:.2f}%<br>EKF SoH: %{y:.2f}%<extra></extra>",
+      showlegend: false },
+    // y = x reference line
+    { type: "scatter", mode: "lines",
+      x: [lo, hi], y: [lo, hi],
+      line: { color: "#94a3b8", width: 1.5, dash: "dash" },
+      name: "y = x", hoverinfo: "skip" },
+  ], {
+    paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+    margin: { l: 52, r: 12, t: 12, b: 52 },
+    xaxis: { title: { text: "BMS-Reported SoH (%)", font: { size: 9.5 } },
+             gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    yaxis: { title: { text: "EKF SoH (%)", font: { size: 9.5 } },
+             gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    showlegend: true,
+    legend: { x: 0.02, y: 0.98, font: { size: 8.5 } },
+  }, { displayModeBar: false, responsive: true });
+}
+
+/* ─── Key Degradation Signals (Bayesian ridge coefficients — negative only) ───── */
+function renderBayesCoef(data) {
+  const el = document.getElementById("bayesCoefPlot");
+  if (!el || !data || !data.global) return;
+
+  const raw = data.global;
+  // Keep only negative coefficients (signals that drive SoH decline), sort most harmful first
+  const sorted = Object.entries(raw)
+    .filter(([, v]) => v != null && isFinite(v) && v < 0)
+    .sort((a, b) => a[1] - b[1])   // most negative first
+    .slice(0, 14);
+
+  if (!sorted.length) return;
+
+  const labels = sorted.map(([k]) => COEF_LABEL_MAP[k] || k);
+  const values = sorted.map(([, v]) => +Math.abs(v).toFixed(5));  // absolute → bars go upward
+
+  Plotly.newPlot(el, [{
+    type: "bar",
+    x: labels,
+    y: values,
+    marker: { color: "#ef4444", opacity: 0.8 },
+    hovertemplate: "%{x}<br>Degradation weight: %{y:.5f}<extra></extra>",
+  }], {
+    paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+    margin: { l: 44, r: 12, t: 12, b: 110 },
+    xaxis: { tickfont: { size: 8 }, tickangle: -40, automargin: true },
+    yaxis: { title: { text: "Degradation weight", font: { size: 9 } },
+             gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    showlegend: false,
+  }, { displayModeBar: false, responsive: true });
 }
 
 /* ─── Anomaly tiers ──────────────────────────────────────────────────────────── */
@@ -110,17 +200,26 @@ function renderAnomalyTiers() {
 
 /* ─── Hover chart setup ──────────────────────────────────────────────────────── */
 const HOVER_FNS = {
-  mean_soh:  chartVehicleSoh,
-  std_soh:   chartSohStdDev,
-  trend:     chartSohTrend,
-  ekf_rul:   chartVehicleRul,
-  eol:       chartEolInfo,
-  data_span: chartDataSpan,
+  // Fleet health table row hovers
+  mean_soh:          chartVehicleSoh,
+  std_soh:           chartSohStdDev,
+  trend:             chartSohTrend,
+  ekf_rul:           chartVehicleRul,
+  eol:               chartEolInfo,
+  data_span:         chartDataSpan,
+  population:        chartPopulation,
+  // KPI card hovers
+  kpi_mean_soh:      chartSohHistogram,
+  kpi_std_soh:       chartSohStdDev,
+  kpi_rul:           chartRulHistogram,
+  kpi_remaining_efc: chartRemainingEfc,
+  kpi_period:        chartDataSpan,
 };
 
 function setupHoverCharts() {
   const panel = document.getElementById("hoverPanel");
 
+  // Fleet health table row hovers
   document.querySelectorAll("[data-hover]").forEach(row => {
     row.addEventListener("mouseenter", () => {
       clearTimeout(_hideTimeout);
@@ -130,6 +229,31 @@ function setupHoverCharts() {
     row.addEventListener("mouseleave", () => {
       clearTimeout(_hoverTimeout);
       _hideTimeout = setTimeout(hideHoverChart, 220);
+    });
+  });
+
+  // KPI card hovers
+  document.querySelectorAll("[data-kpi-hover]").forEach(card => {
+    card.addEventListener("mouseenter", () => {
+      clearTimeout(_hideTimeout);
+      clearTimeout(_hoverTimeout);
+      _hoverTimeout = setTimeout(() => showHoverChart(card.dataset.kpiHover, card), 200);
+    });
+    card.addEventListener("mouseleave", () => {
+      clearTimeout(_hoverTimeout);
+      _hideTimeout = setTimeout(hideHoverChart, 300);
+    });
+  });
+
+  // (i) icons inside KPI cards — tooltip takes priority; suppress the chart hover
+  document.querySelectorAll("[data-kpi-hover] .col-info").forEach(icon => {
+    icon.addEventListener("mouseenter", e => {
+      e.stopPropagation();          // prevent card mouseenter from firing
+      clearTimeout(_hoverTimeout);  // cancel any in-flight chart delay
+      hideHoverChart();             // dismiss chart if already showing
+    });
+    icon.addEventListener("mouseleave", e => {
+      e.stopPropagation();          // prevent card mouseleave from scheduling hide
     });
   });
 
@@ -145,10 +269,7 @@ function showHoverChart(type, rowEl) {
   const textEl = document.getElementById("hoverText");
   const rect   = rowEl.getBoundingClientRect();
   const isText = type === "eol";
-  const isBigBar = type === "mean_soh" || type === "ekf_rul";
-  const maxH = window.innerHeight - 80;
-  // Big bar charts size dynamically; cap at viewport height
-  const panelH = isText ? 180 : (isBigBar ? Math.min(maxH, Math.max(300, (_vehicles || []).length * 22 + 80)) : 300);
+  const panelH = isText ? 180 : 300;
 
   // Position panel
   const panelW = 480;
@@ -184,35 +305,30 @@ function hideHoverChart() {
 
 /* ─── Chart: vehicle SoH bar ─────────────────────────────────────────────────── */
 function chartVehicleSoh(plotEl) {
-  // Sort descending; reverse so highest SoH ends up at top of horizontal chart
+  // Sort descending so highest SoH is leftmost
   const sorted = [..._vehicles]
     .filter(v => v.current_soh != null)
-    .sort((a, b) => a.current_soh - b.current_soh);   // ascending → top of y-axis = highest
+    .sort((a, b) => b.current_soh - a.current_soh);
 
-  const labels = sorted.map(v => v.registration_number);
   const colors = sorted.map(v =>
     v.current_soh >= 97 ? "#22c55e" :
     v.current_soh >= 95 ? "#f59e0b" : "#ef4444"
   );
 
-  const h = Math.min(window.innerHeight - 80, Math.max(282, sorted.length * 22 + 80));
-  document.getElementById("hoverPanel").style.height = h + "px";
-  document.getElementById("hoverPlot").style.height  = h + "px";
-
   Plotly.newPlot(plotEl, [{
     type: "bar",
-    orientation: "h",
-    y: labels,
-    x: sorted.map(v => v.current_soh),
+    x: sorted.map(v => v.registration_number),
+    y: sorted.map(v => v.current_soh),
     marker: { color: colors },
-    hovertemplate: "%{y}<br>SoH: %{x:.2f}%<extra></extra>",
+    hovertemplate: "%{x}<br>SoH: %{y:.2f}%<extra></extra>",
   }], {
-    ...baseLayout("Vehicle EKF SoH — high to low"),
-    height: h,
-    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } }, range: [93, 100] },
-    yaxis: { tickfont: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
-    margin: { t: 34, b: 40, l: 110, r: 14 },
-  }, cfg());
+    ...baseLayout("EKF SoH per vehicle"),
+    width: undefined,
+    height: 282,
+    xaxis: { tickfont: { size: 7.5, color: "#1e293b" }, tickangle: -40, automargin: true },
+    yaxis: { ...yAx("SoH (%)"), range: [93, 100] },
+    margin: { t: 34, b: 70, l: 46, r: 14 },
+  }, { displayModeBar: false, responsive: true });
 }
 
 /* ─── Chart: SoH std dev histogram ──────────────────────────────────────────── */
@@ -317,39 +433,114 @@ function chartSohTrend(plotEl) {
 
 /* ─── Chart: vehicle RUL bar ─────────────────────────────────────────────────── */
 function chartVehicleRul(plotEl) {
-  const all = [..._vehicles]
-    .filter(v => v.rul_days != null)
-    .sort((a, b) => a.rul_days - b.rul_days);   // ascending → highest RUL at top
+  const field = v => v.ekf_rul_days != null ? v.ekf_rul_days : v.rul_days;
+  const all = [..._vehicles].filter(v => field(v) != null);
 
   // Outlier removal: exclude values above Q3 + 3×IQR
-  const vals = all.map(v => v.rul_days);
+  const vals  = all.map(v => field(v)).sort((a, b) => a - b);
   const q1    = vals[Math.floor(vals.length * 0.25)];
   const q3    = vals[Math.floor(vals.length * 0.75)];
   const fence = q3 + 3 * (q3 - q1);
-  const sorted = all.filter(v => v.rul_days <= fence);
+
+  // Sort descending so longest RUL is leftmost
+  const sorted = all
+    .filter(v => field(v) <= fence)
+    .sort((a, b) => field(b) - field(a));
 
   const colors = sorted.map(v =>
-    v.rul_days > 730 ? "#22c55e" :
-    v.rul_days > 365 ? "#f59e0b" : "#ef4444"
+    field(v) > 730 ? "#22c55e" :
+    field(v) > 365 ? "#f59e0b" : "#ef4444"
   );
-
-  const h = Math.min(window.innerHeight - 80, Math.max(282, sorted.length * 22 + 80));
-  document.getElementById("hoverPanel").style.height = h + "px";
-  document.getElementById("hoverPlot").style.height  = h + "px";
 
   Plotly.newPlot(plotEl, [{
     type: "bar",
-    orientation: "h",
-    y: sorted.map(v => v.registration_number),
-    x: sorted.map(v => +(v.rul_days / 365.25).toFixed(2)),
+    x: sorted.map(v => v.registration_number),
+    y: sorted.map(v => +(field(v) / 365.25).toFixed(2)),
     marker: { color: colors },
-    hovertemplate: "%{y}<br>RUL: %{x:.2f} yr<extra></extra>",
+    hovertemplate: "%{x}<br>RUL: %{y:.2f} yr<extra></extra>",
   }], {
-    ...baseLayout("EKF RUL per vehicle — high to low"),
-    height: h,
-    xaxis: { ...xAx(), title: { text: "RUL (years)", font: { size: 9 } } },
-    yaxis: { tickfont: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 8, color: "#1e293b" }, automargin: true },
-    margin: { t: 34, b: 40, l: 110, r: 14 },
+    ...baseLayout("EKF RUL per vehicle"),
+    width: undefined,
+    height: 282,
+    xaxis: { tickfont: { size: 7.5, color: "#1e293b" }, tickangle: -40, automargin: true },
+    yaxis: { ...yAx("RUL (years)") },
+    margin: { t: 34, b: 70, l: 46, r: 14 },
+  }, { displayModeBar: false, responsive: true });
+}
+
+/* ─── Chart: SoH distribution histogram (KPI card hover) ────────────────────── */
+function chartSohHistogram(plotEl) {
+  const sohVals = _vehicles.map(v => v.current_soh).filter(v => v != null);
+  const mu  = _overview.fleet_mean_soh;
+  const sig = _overview.fleet_std_soh;
+  const lo  = mu - 1.96 * sig;
+  const hi  = mu + 1.96 * sig;
+
+  Plotly.newPlot(plotEl, [{
+    type: "histogram",
+    x: sohVals,
+    nbinsx: 6,
+    marker: { color: "#3b82f6", opacity: 0.75 },
+    hovertemplate: "SoH: %{x:.2f}%<br>Count: %{y}<extra></extra>",
+  }], {
+    ...baseLayout(`SoH Distribution   µ=${mu.toFixed(3)}%  σ=${sig.toFixed(3)}%`),
+    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } } },
+    yaxis: { ...yAx("Count") },
+    shapes: [
+      { type: "rect", x0: lo, x1: hi, y0: 0, y1: 1,
+        xref: "x", yref: "paper", fillcolor: "rgba(59,130,246,0.10)", line: { width: 0 } },
+      { type: "line", x0: mu, x1: mu, y0: 0, y1: 1,
+        xref: "x", yref: "paper", line: { color: "#1e293b", width: 1.5, dash: "dash" } },
+    ],
+    annotations: [
+      { x: mu, y: 0.98, xref: "x", yref: "paper", text: `µ=${mu.toFixed(3)}%`,
+        showarrow: false, font: { size: 8.5, color: "#1e293b", family: "Plus Jakarta Sans" },
+        bgcolor: "rgba(255,255,255,0.8)", borderpad: 2 },
+      { x: lo, y: 0.5, xref: "x", yref: "paper", text: "−1.96σ",
+        showarrow: false, font: { size: 8, color: "#64748b", family: "Plus Jakarta Sans" } },
+      { x: hi, y: 0.5, xref: "x", yref: "paper", text: "+1.96σ",
+        showarrow: false, font: { size: 8, color: "#64748b", family: "Plus Jakarta Sans" } },
+    ],
+  }, cfg());
+}
+
+/* ─── Chart: RUL histogram (KPI card hover) ──────────────────────────────────── */
+function chartRulHistogram(plotEl) {
+  const rulYears = _vehicles
+    .filter(v => v.ekf_rul_days != null && v.ekf_rul_days > 0)
+    .map(v => +(v.ekf_rul_days / 365.25).toFixed(2));
+
+  if (!rulYears.length) { Plotly.purge(plotEl); return; }
+
+  const med = _overview.median_ekf_rul != null
+    ? +(_overview.median_ekf_rul / 365.25).toFixed(2) : null;
+
+  const shapes = [], annotations = [];
+  if (med != null) {
+    shapes.push({ type: "line", x0: med, x1: med, y0: 0, y1: 1,
+      xref: "x", yref: "paper", line: { color: "#1e293b", width: 1.5, dash: "dash" } });
+    annotations.push({ x: med, y: 0.98, xref: "x", yref: "paper",
+      text: `Median ${med.toFixed(2)} yr`, showarrow: false,
+      font: { size: 8.5, color: "#1e293b", family: "Plus Jakarta Sans" },
+      bgcolor: "rgba(255,255,255,0.8)", borderpad: 2 });
+  }
+
+  const minV = Math.floor(Math.min(...rulYears) * 4) / 4;   // round down to nearest 0.25
+  const maxV = Math.ceil(Math.max(...rulYears)  * 4) / 4;   // round up   to nearest 0.25
+
+  Plotly.newPlot(plotEl, [{
+    type: "histogram",
+    x: rulYears,
+    autobinx: false,
+    xbins: { start: minV, end: maxV, size: 0.25 },           // 3-month bins
+    marker: { color: "#8b5cf6", opacity: 0.75 },
+    hovertemplate: "RUL: %{x:.2f}–%{x:.2f} yr<br>Count: %{y}<extra></extra>",
+  }], {
+    ...baseLayout("EKF RUL Distribution (years)"),
+    xaxis: { ...xAx(), title: { text: "RUL (years)", font: { size: 9 } }, dtick: 0.5 },
+    yaxis: { ...yAx("Count") },
+    shapes,
+    annotations,
   }, cfg());
 }
 
@@ -447,6 +638,79 @@ function cfg() {
   return { displayModeBar: false, responsive: false };
 }
 
+/* ─── Chart: Remaining EFC histogram ────────────────────────────────────────── */
+function chartRemainingEfc(plotEl) {
+  const vals = (_overview.remaining_efc_per_veh || []).filter(v => v != null && v > 0);
+  if (!vals.length) {
+    plotEl.innerHTML = `<div style="padding:20px;color:#94a3b8;font-size:.82rem;text-align:center">No remaining EFC data available.</div>`;
+    return;
+  }
+  const med = _overview.fleet_median_remaining_efc;
+  Plotly.newPlot(plotEl, [{
+    type: "histogram",
+    x: vals,
+    nbinsx: 6,
+    marker: { color: "#10b981", opacity: 0.75 },
+    hovertemplate: "Remaining EFC: %{x:.0f}<br>Vehicles: %{y}<extra></extra>",
+  }], {
+    ...baseLayout(`Remaining EFC — fleet  median=${med != null ? Math.round(med) : "—"}`),
+    xaxis: { ...xAx(), title: { text: "Estimated Remaining EFC", font: { size: 9 } } },
+    yaxis: { ...yAx("Vehicles") },
+    shapes: med != null ? [{
+      type: "line", x0: med, x1: med, y0: 0, y1: 1,
+      xref: "x", yref: "paper",
+      line: { color: "#1e293b", width: 1.5, dash: "dash" },
+    }] : [],
+    annotations: med != null ? [{
+      x: med, y: 0.96, xref: "x", yref: "paper",
+      text: `median=${Math.round(med)}`, showarrow: false,
+      font: { size: 8.5, color: "#1e293b", family: "Plus Jakarta Sans" },
+      bgcolor: "rgba(255,255,255,0.8)", borderpad: 2,
+    }] : [],
+  }, cfg());
+}
+
+/* ─── Chart: Population breakdown donut ──────────────────────────────────────── */
+function chartPopulation(plotEl) {
+  const o        = _overview;
+  const charging  = o.charging_sessions  ?? 0;
+  const discharge = o.discharge_sessions ?? 0;
+  const other     = Math.max(0, (o.total_sessions ?? 0) - charging - discharge);
+  const labels = ["Charging", "Discharging", ...(other > 0 ? ["Other"] : [])];
+  const values = [charging,  discharge,      ...(other > 0 ? [other]  : [])];
+
+  Plotly.newPlot(plotEl, [{
+    type: "pie", hole: 0.52,
+    labels, values,
+    marker: { colors: ["#f59e0b", "#6366f1", "#94a3b8"] },
+    textinfo: "label+percent", textposition: "outside",
+    hovertemplate: "%{label}: %{value:,} sessions (%{percent})<extra></extra>",
+  }], {
+    ...baseLayout(`${(o.total_sessions || 0).toLocaleString()} Total Sessions`),
+    height: 260,
+    showlegend: false,
+    margin: { t: 34, b: 10, l: 10, r: 10 },
+  }, cfg());
+}
+
+/* ─── Bad anomaly filter (only highlight genuinely harmful sessions) ─────────── */
+function isBadAnomaly(s) {
+  // CUSUM alarms always track sustained degradation (inherently bad)
+  if (s.cusum_ekf_soh_alarm || s.cusum_soh_alarm || s.cusum_cycle_soh_alarm ||
+      s.cusum_heat_alarm     || s.cusum_spread_alarm || s.cusum_spread_slope_alarm ||
+      s.cusum_epk_alarm      || s.cusum_ir_slope_alarm) return true;
+  // IF anomaly: only bad if reason contains known degradation indicators
+  if (s.if_anomaly) {
+    const reason = (s.if_reason || "").toLowerCase();
+    const BAD = ["n_high_ir","ir_ohm","ir_event","n_vsag","d_vsag","cell_spread",
+                 "subsystem_voltage","temp","thermal","dod_stress","n_low_soc",
+                 "voltage_min","soh","ekf_soh","capacity_soh","cycle_soh",
+                 "energy_per_loaded","capacity_ah"];
+    if (BAD.some(k => reason.includes(k))) return true;
+  }
+  return false;
+}
+
 /* ─── boot ───────────────────────────────────────────────────────────────────── */
 document.addEventListener("DOMContentLoaded", () => {
   init();
@@ -471,6 +735,8 @@ const COEF_LABEL_MAP = {
   vsag_trend_slope: "V-sag trend slope", ir_event_rate: "IR event rate",
   energy_per_km: "Energy per km", energy_kwh: "Energy kWh",
   energy_per_loaded_session: "Energy per loaded session",
+  capacity_ah_discharge_new: "Cap AH discharged (hves1)", capacity_ah_charge_new: "Cap AH regen (hves1)",
+  capacity_ah_plugin_new: "Cap AH plugin (hves1)", capacity_ah_charge_total_new: "Cap AH chrg. total (hves1)",
   block_capacity_ah: "Block capacity AH", block_odometer_km: "Block odometer km",
   charging_rate_kw: "Charge rate kW", thermal_stress: "Thermal stress",
   c_rate_chg: "Charge C-rate", is_loaded: "Is loaded", odometer_km: "Odometer km",
@@ -925,16 +1191,16 @@ function generateCompositeAnalysis(vehicle) {
    (exact replication of localhost sections 7 / 8 / 9)
    ════════════════════════════════════════════════════════════════════════════ */
 
-// ── Session table constants (mirrors dashboard.js) ────────────────────────
+// ── Session table constants ────────────────────────────────────────────────
 const VD_SESS_HEADERS = [
-  "Vehicle","Start","End","Type","Start SoC","End SoC","BMS SoH","EKF SoH","Duration (hrs)",
+  "Vehicle","Start","End","Days in Service","Type","Start SoC","End SoC","BMS SoH","EKF SoH","Duration (hrs)",
   "IF Score","IF Anomaly","CUSUM Anomaly","Degr. Score","Reason","Flagged",
-  "V-Sags","IR Mean","Spread","Energy/km","Energy KWh","Low SOC",
-  "Ref Cap AH","Voltage","Current","Cap AH Dischrg.","Cap AH Chrg.","Cap AH Plugin",
+  "V-Sags","IR Mean","Spread","Energy/km","Energy kWh","Low SOC",
+  "Ref Cap AH","Voltage","Current","Cap AH Dischrg.","Cap AH Regen","Cap AH Plugin","Cap AH Chrg. Total",
   "Cycle SOH","Block Cap AH","Block Odm Km","Chg Rate KW",
   "Cell Spread","Weak Subsys.","Hot Subsys.","Subsys V Std",
   "Temp Rise","BMS Cov.","Speed","Is Loaded","Cum EFC",
-  "Days Since First","Aging Index",
+  "Aging Index",
   "VSag Rate/hr","IR Event Rate","IR EWM10","Spread EWM10",
   "Temp EWM10","VSag EWM10","VSag Trend","IR Evt Trend",
   "IR Trend","Spread Trend","SoH Trend","C-Rate Chg",
@@ -942,14 +1208,14 @@ const VD_SESS_HEADERS = [
   "Cell Health","Cell Undervolt","Cell Overvolt","Rapid Heat","High E/km","Slow Chg","Fast Chg",
 ];
 const VD_SESS_FIELDS = [
-  "registration_number","start_time_ist","end_time_ist","session_type","soc_start","soc_end","soh","ekf_soh","duration_hr",
+  "registration_number","start_time_ist","end_time_ist","days_since_first","session_type","soc_start","soc_end","soh","ekf_soh","duration_hr",
   "if_score","if_anomaly","cusum_anomaly","composite_degradation_score","anomaly_reason","is_anomalous",
   "n_vsag","ir_ohm_mean","cell_spread_mean","energy_per_km","energy_kwh","n_low_soc",
-  "ref_capacity_ah","voltage_mean_new","current_mean_new","capacity_ah_discharge_new","capacity_ah_charge_new","capacity_ah_plugin_new",
+  "ref_capacity_ah","voltage_mean_new","current_mean_new","capacity_ah_discharge_new","capacity_ah_charge_new","capacity_ah_plugin_new","capacity_ah_charge_total_new",
   "cycle_soh","block_capacity_ah","block_odometer_km","charging_rate_kw",
   "cell_spread_max","weak_subsystem_consistency","hot_subsystem_consistency","subsystem_voltage_std",
   "temp_rise_rate","bms_coverage","speed_mean","is_loaded","cum_efc",
-  "days_since_first","aging_index",
+  "aging_index",
   "vsag_rate_per_hr","ir_event_rate","ir_ohm_mean_ewm10","cell_spread_mean_ewm10",
   "temp_rise_rate_ewm10","vsag_rate_per_hr_ewm10","vsag_trend_slope","ir_event_trend_slope",
   "ir_ohm_trend_slope","spread_trend_slope","soh_trend_slope","c_rate_chg",
@@ -959,10 +1225,81 @@ const VD_SESS_FIELDS = [
 const VD_SESS_BOOL = new Set(["if_anomaly","cusum_anomaly","is_anomalous",
   "cell_health_poor","rapid_heating","high_energy_per_km","slow_charging","fast_charging"]);
 
+// ── Column descriptions for (i) icons ─────────────────────────────────────
+const VD_COL_DESCRIPTIONS = {
+  "Vehicle":          "Vehicle registration number",
+  "Days in Service":  "Days since this vehicle's first recorded session",
+  "Start":            "Session start time (IST)",
+  "End":              "Session end time (IST)",
+  "Type":             "Charging or discharging (operational) session",
+  "Start SoC":        "Battery charge level at session start (%)",
+  "End SoC":          "Battery charge level at session end (%)",
+  "BMS SoH":          "Battery health as reported by the onboard Battery Management System (%)",
+  "EKF SoH":          "Battery health estimated by our real-time tracking model — more accurate than BMS reporting (%)",
+  "Duration (hrs)":   "Total session duration in hours",
+  "IF Score":         "Abnormality score — higher values mean this session was statistically more unusual",
+  "IF Anomaly":       "Flagged by outlier detection (unusual combination of signals in this session)",
+  "CUSUM Anomaly":    "Flagged by drift tracker (sustained deterioration detected across multiple sessions)",
+  "Degr. Score":      "Combined degradation risk score for this session (0–1 scale, higher = worse)",
+  "Reason":           "Primary signal(s) that triggered the anomaly flag",
+  "Flagged":          "Whether this session is marked as anomalous",
+  "V-Sags":           "Number of voltage dip events — high counts indicate the battery is under stress",
+  "IR Mean":          "Average internal resistance (Ω) — rising values indicate battery wear",
+  "Spread":           "Average voltage difference between best and worst cell (mV) — higher means uneven aging",
+  "Energy/km":        "Energy consumed per kilometre (kWh/km) — higher means lower efficiency",
+  "Energy kWh":       "Total energy consumed or delivered in this session (kWh)",
+  "Low SOC":          "Times the battery dropped to a critically low charge level during this session",
+  "Ref Cap AH":       "Reference capacity of the battery pack (Amp-hours)",
+  "Voltage":          "Average pack voltage during the session (V)",
+  "Current":          "Average current during the session (A)",
+  "Cap AH Dischrg.":    "Ah drawn from the pack during motoring this session — measured by the hves1_current sensor (more accurate than BMS internal current)",
+  "Cap AH Regen":       "Ah recovered via regenerative braking during this session — measured by hves1_current while the vehicle is moving",
+  "Cap AH Plugin":      "Ah pushed into the pack during plug-in charging this session — measured by hves1_current while the vehicle is stationary and connected",
+  "Cap AH Chrg. Total": "Total charge Ah this session = regenerative braking + plug-in (regen + plugin). This is the figure used for charging-side SoH and block capacity calculations",
+  "Cycle SOH":          "Battery health estimated via coulomb counting (Ah integration) over this session — derived from any charge or discharge session, not necessarily a full cycle (%)",
+  "Block Cap AH":       "Total Ah of the entire drive-to-charge block containing this session. For discharge blocks: sum of motoring Ah (hves1_current); for charge blocks: sum of regen + plugin Ah (hves1_current). Used in the fallback cycle SoH calculation",
+  "Block Odm Km":     "Distance associated with this block (km)",
+  "Chg Rate KW":      "Average charging power during this session (kW)",
+  "Cell Spread":      "Maximum cell voltage imbalance across the pack (mV) — higher = more uneven aging",
+  "Weak Subsys.":     "Consistency of the weakest subsystem (lower = less reliable)",
+  "Hot Subsys.":      "Consistency of the hottest subsystem (lower = more thermal variability)",
+  "Subsys V Std":     "Standard deviation of subsystem voltages — measures pack uniformity",
+  "Temp Rise":        "Rate at which temperature rose during the session (°C/min)",
+  "BMS Cov.":         "Fraction of the session where BMS data was available (0–1)",
+  "Speed":            "Average vehicle speed during the session (km/h)",
+  "Is Loaded":        "Whether the vehicle carried passengers/cargo (Inbound = loaded, Outbound = empty)",
+  "Cum EFC":          "Cumulative equivalent full charge cycles since the vehicle entered service",
+  "Aging Index":      "Composite aging score combining calendar age, cycle count, and usage intensity",
+  "VSag Rate/hr":     "Rate of voltage sag events per hour of operation",
+  "IR Event Rate":    "Rate of high internal resistance events per session",
+  "IR EWM10":         "Smoothed internal resistance trend (10-session average)",
+  "Spread EWM10":     "Smoothed cell spread trend (10-session average)",
+  "Temp EWM10":       "Smoothed temperature rise trend (10-session average)",
+  "VSag EWM10":       "Smoothed voltage sag rate trend (10-session average)",
+  "VSag Trend":       "Long-term slope of voltage sag rate — positive means worsening",
+  "IR Evt Trend":     "Long-term slope of IR event rate — positive means worsening",
+  "IR Trend":         "Long-term slope of internal resistance — positive means rising",
+  "Spread Trend":     "Long-term slope of cell spread — positive means increasing imbalance",
+  "SoH Trend":        "Long-term slope of battery health — negative means declining",
+  "C-Rate Chg":       "Charge rate relative to battery capacity — higher means faster charging",
+  "DoD Stress":       "Depth of discharge stress index — high values mean deep cycling (harder on battery)",
+  "Thermal Stress":   "Thermal stress index — high values mean sustained high-temperature operation",
+  "E/Loaded":         "Energy consumed per loaded (occupied) session (kWh)",
+  "Total Alerts":     "Total number of BMS alerts raised during this session",
+  "Cell Health":      "Whether any cell was flagged as in poor health",
+  "Cell Undervolt":   "Number of cells that fell below minimum voltage threshold",
+  "Cell Overvolt":    "Number of cells that exceeded maximum voltage threshold",
+  "Rapid Heat":       "Whether the battery heated up unusually fast during this session",
+  "High E/km":        "Whether energy consumption per km was unusually high",
+  "Slow Chg":         "Whether charging was unusually slow (possible charger or battery issue)",
+  "Fast Chg":         "Whether fast (DC) charging was used in this session",
+};
+
 // ── Per-overlay state ─────────────────────────────────────────────────────
 let _vdSessCache  = null;
 let _vdSessFilter = { detector: null, signal: null, sessionType: null };
 let _vdReg        = null;
+let _vdBdCache    = null;   // stored so detector chart can re-render itself on click
 
 // ── CUSUM / IF filter maps (mirrors dashboard.js) ─────────────────────────
 const VD_CUSUM_FILTER = {
@@ -1023,15 +1360,41 @@ async function _vdRenderDetectorChart(byDetector) {
   const el = document.getElementById("vdDetChart");
   if (!el) return;
   el.innerHTML = "";
+  const detKeys   = Object.keys(byDetector);
+  const detValues = Object.values(byDetector);
+  const labelToKey = label => label.toLowerCase().includes("isolation") ? "if" : "cusum";
+  const pull = detKeys.map(k => labelToKey(k) === _vdSessFilter.detector ? 0.12 : 0);
+
   await Plotly.newPlot("vdDetChart", [{
     type: "pie", hole: 0.5,
     domain: { x: [0.0, 0.68], y: [0.05, 0.95] },
-    labels: Object.keys(byDetector), values: Object.values(byDetector),
+    labels: detKeys, values: detValues, pull,
     marker: { colors: ["#6366f1","#0ea5e9"] },
     textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
     hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
   }], { ...VD_DONUT_LAYOUT, width: VD_DONUT_W, height: VD_DONUT_H },
   { displayModeBar: false });
+
+  el.removeAllListeners("plotly_click");
+  el.on("plotly_click", async data => {
+    const label    = detKeys[data.points[0].pointNumber];
+    const detector = labelToKey(label);
+    _vdSessFilter.detector = (_vdSessFilter.detector === detector) ? null : detector;
+    _vdSessFilter.signal   = null;
+    // Re-render with updated pull
+    await _vdRenderDetectorChart(byDetector);
+    const params = new URLSearchParams();
+    if (_vdSessFilter.detector)    params.set("detector",     _vdSessFilter.detector);
+    if (_vdSessFilter.sessionType) params.set("session_type", _vdSessFilter.sessionType);
+    const url = `/api/anomaly-breakdown/${_vdReg}/` + (params.toString() ? "?" + params : "");
+    const fd  = await fetch(url).then(r => r.json());
+    const parts = [];
+    if (_vdSessFilter.detector)    parts.push(label);
+    if (_vdSessFilter.sessionType) parts.push(_vdSessFilter.sessionType);
+    await _vdRenderSignalChart(fd.by_signal,
+      parts.length ? `${parts.join(" · ")} — ${_vdReg}` : _vdReg);
+    _vdRefreshSessions();
+  });
 }
 
 async function _vdRenderSignalChart(bySignal, scope) {
@@ -1044,10 +1407,12 @@ async function _vdRenderSignalChart(bySignal, scope) {
     el.innerHTML = `<div style="padding:20px;color:#94a3b8;font-size:.82rem;text-align:center">No signal data</div>`;
     return;
   }
+  const pull = labels.map(l => l === _vdSessFilter.signal ? 0.12 : 0);
+
   await Plotly.newPlot("vdSigChart", [{
     type: "pie", hole: 0.5,
     domain: { x: [0.0, 0.68], y: [0.05, 0.95] },
-    labels, values,
+    labels, values, pull,
     marker: { colors: VD_SIG_PALETTE.slice(0, labels.length) },
     textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
     hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
@@ -1056,8 +1421,10 @@ async function _vdRenderSignalChart(bySignal, scope) {
 
   el.removeAllListeners("plotly_click");
   el.on("plotly_click", data => {
-    const signal = data.points[0].label;
+    const signal = labels[data.points[0].pointNumber];
+    if (!signal) return;
     _vdSessFilter.signal = (_vdSessFilter.signal === signal) ? null : signal;
+    _vdRenderSignalChart(bySignal, scope);  // re-render self to update pull
     _vdRefreshSessions();
   });
 }
@@ -1072,17 +1439,22 @@ async function _vdRenderTypeChart(sessions, scope) {
     return;
   }
   const counts = {};
-  sessions.forEach(s => { const t = s.session_type||"unknown"; counts[t]=(counts[t]||0)+1; });
-  const TYPE_COLORS    = { charging: "#f59e0b", discharge: "#6366f1", idle: "#94a3b8" };
-  const TYPE_LABELS    = { charging: "Charging", discharge: "Discharging", idle: "Idle" };
+  sessions.forEach(s => { const t = s.session_type || "unknown"; counts[t] = (counts[t] || 0) + 1; });
+  const TYPE_COLORS = { charging: "#f59e0b", discharge: "#6366f1", idle: "#94a3b8" };
+  const TYPE_LABELS = { charging: "Charging", discharge: "Discharging", idle: "Idle" };
   const rawKeys = Object.keys(counts);
   const labels  = rawKeys.map(k => TYPE_LABELS[k] || k.charAt(0).toUpperCase() + k.slice(1));
   const values  = Object.values(counts);
+
+  // Pull out the currently-selected slice so the user can see what's active
+  const activeST = _vdSessFilter.sessionType;
+  const pull = rawKeys.map(k => k === activeST ? 0.12 : 0);
+
   await Plotly.newPlot("vdTypeChart", [{
     type: "pie", hole: 0.5,
     domain: { x: [0.0, 0.68], y: [0.05, 0.95] },
-    labels, values,
-    marker: { colors: rawKeys.map(l => TYPE_COLORS[l]||"#6b7280") },
+    labels, values, pull,
+    marker: { colors: rawKeys.map(k => TYPE_COLORS[k] || "#6b7280") },
     textinfo: "percent", textposition: "inside", insidetextorientation: "radial",
     hovertemplate: "%{label}: %{value} sessions (%{percent})<extra></extra>",
   }], { ...VD_DONUT_LAYOUT, width: VD_DONUT_W, height: VD_DONUT_H },
@@ -1090,13 +1462,15 @@ async function _vdRenderTypeChart(sessions, scope) {
 
   el.removeAllListeners("plotly_click");
   el.on("plotly_click", async data => {
-    const sessionType = data.points[0].label;
-    _vdSessFilter.sessionType = (_vdSessFilter.sessionType === sessionType) ? null : sessionType;
-    // Re-fetch signal breakdown filtered by session type + detector
+    // Use pointNumber to index into rawKeys — reliable regardless of Plotly's internal slice ordering
+    const clicked = rawKeys[data.points[0].pointNumber];
+    if (!clicked) return;
+    _vdSessFilter.sessionType = (_vdSessFilter.sessionType === clicked) ? null : clicked;
+
     const params = new URLSearchParams();
     if (_vdSessFilter.detector)    params.set("detector",     _vdSessFilter.detector);
     if (_vdSessFilter.sessionType) params.set("session_type", _vdSessFilter.sessionType);
-    const url = `/api/anomaly-breakdown/${_vdReg}/` + (params.toString() ? "?"+params : "");
+    const url = `/api/anomaly-breakdown/${_vdReg}/` + (params.toString() ? "?" + params : "");
     const fd  = await fetch(url).then(r => r.json());
     const parts = [];
     if (_vdSessFilter.detector)    parts.push(_vdSessFilter.detector.toUpperCase());
@@ -1112,7 +1486,7 @@ function _vdRenderSessionRows(sessions) {
     return `<tr><td colspan="${VD_SESS_HEADERS.length}" style="text-align:center;color:#94a3b8;padding:16px;font-size:.82rem">No sessions match the current filter.</td></tr>`;
 
   return sessions.map(s => {
-    const flagged = !!s.is_anomalous;
+    const flagged = isBadAnomaly(s);
     const sid     = s.session_id ?? "";
     const cells   = VD_SESS_FIELDS.map(f => {
       const v = s[f];
@@ -1156,8 +1530,10 @@ function _vdRefreshSessions() {
   const preType = _vdApplyFilter(_vdSessCache.sessions, { excludeSessionType: true });
   _vdRenderTypeChart(preType, _vdReg);
 
-  // Final filtered
-  const filtered = sessionType ? preType.filter(s => s.session_type === sessionType) : preType;
+  // Final filtered — strict match; null/undefined session_type never matches
+  const filtered = sessionType
+    ? preType.filter(s => s.session_type != null && s.session_type === sessionType)
+    : preType;
 
   let filterNote = "";
   if (detector)    filterNote += detector.toUpperCase();
@@ -1169,10 +1545,15 @@ function _vdRefreshSessions() {
     `${_vdSessCache.total_anomalous} anomalous of ${_vdSessCache.total_sessions} total${filterNote} ` +
     `· amber = anomalous · click a row for telemetry · click charts to filter`;
 
-  const thead = `<thead><tr>${VD_SESS_HEADERS.map(h =>
-    `<th style="background:#f8fafc;color:#475569;font-size:.7rem;font-weight:600;
+  const thead = `<thead><tr>${VD_SESS_HEADERS.map(h => {
+    const tip = VD_COL_DESCRIPTIONS[h] || "";
+    const icon = tip
+      ? ` <span style="cursor:help;color:#94a3b8;font-size:.6rem;position:relative" title="${tip}">ⓘ</span>`
+      : "";
+    return `<th style="background:#f8fafc;color:#475569;font-size:.7rem;font-weight:600;
      text-transform:uppercase;letter-spacing:.04em;padding:8px 16px;white-space:nowrap;
-     border-bottom:1px solid #e2e8f0;position:sticky;top:0;z-index:2">${h}</th>`).join("")}</tr></thead>`;
+     border-bottom:1px solid #e2e8f0;position:sticky;top:0;z-index:2">${h}${icon}</th>`;
+  }).join("")}</tr></thead>`;
 
   document.getElementById("vdSessContainer").innerHTML =
     `<div style="overflow-x:auto;max-height:420px;border-radius:6px;border:1px solid #e2e8f0">
@@ -1192,26 +1573,24 @@ async function renderVDSection4(sessData, bdData, reg, container) {
   const sec = document.createElement("div");
   sec.className = "vd-section";
   sec.innerHTML = `
-    <div class="vd-section-hdr">Alert Breakdown &amp; Anomalous Sessions</div>
+    <div class="vd-section-hdr">Anomalous Sessions</div>
 
-    <!-- Detector descriptions -->
+    <!-- Detector descriptions (plain language) -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
       <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px">
-        <div style="font-size:.72rem;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Isolation Forest (IF)</div>
+        <div style="font-size:.72rem;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Outlier Detection <span style="font-weight:400;text-transform:none;letter-spacing:0">(IF)</span></div>
         <div style="font-size:.75rem;color:#334155;line-height:1.5">
-          A tree-based unsupervised algorithm that isolates anomalies by randomly partitioning features.
-          Anomalies — being rare and extreme — are isolated in fewer splits. Catches
-          <strong>multivariate outliers</strong>: unusual combinations of SoC, current, temperature, cell spread, and IR
-          that don't stand out on any single signal but collectively indicate abnormal session behaviour.
+          Spots <strong>sudden anomalies</strong> — flags sessions where the combination of charge level,
+          temperature, cell balance, and internal resistance looks unusual compared to normal behaviour.
+          One bad session in isolation. <em>Think: "this session was abnormal."</em>
         </div>
       </div>
       <div style="background:#fdf4ff;border:1px solid #e9d5ff;border-radius:8px;padding:10px 14px">
-        <div style="font-size:.72rem;font-weight:700;color:#7e22ce;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">CUSUM (Cumulative Sum)</div>
+        <div style="font-size:.72rem;font-weight:700;color:#7e22ce;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Drift Tracking <span style="font-weight:400;text-transform:none;letter-spacing:0">(CUSUM)</span></div>
         <div style="font-size:.75rem;color:#334155;line-height:1.5">
-          A sequential statistical test that accumulates deviations from a reference mean over time.
-          When the cumulative sum exceeds a threshold, a shift is flagged. Catches
-          <strong>sustained directional drift</strong>: gradual degradation in cell spread, IR rise, temperature creep,
-          or SoC anomalies that persist across multiple sessions rather than spiking once.
+          Identifies <strong>gradual wear</strong> — detects slow, sustained deterioration building up
+          over many sessions, such as steadily rising internal resistance or creeping cell imbalance
+          that no single session makes obvious. <em>Think: "this vehicle is on a declining trend."</em>
         </div>
       </div>
     </div>
@@ -1265,29 +1644,7 @@ async function renderVDSection4(sessData, bdData, reg, container) {
     if (bdData && bdData.by_detector) {
       await _vdRenderDetectorChart(bdData.by_detector);
 
-      // Detector chart click → filter sessions + update signal chart
-      const detEl = document.getElementById("vdDetChart");
-      if (detEl) {
-        detEl.removeAllListeners("plotly_click");
-        detEl.on("plotly_click", async data => {
-          const label    = data.points[0].label;
-          const detector = label.toLowerCase().includes("isolation") ? "if" : "cusum";
-          _vdSessFilter.detector = (_vdSessFilter.detector === detector) ? null : detector;
-          _vdSessFilter.signal   = null;
-          const params = new URLSearchParams();
-          if (_vdSessFilter.detector)    params.set("detector",     _vdSessFilter.detector);
-          if (_vdSessFilter.sessionType) params.set("session_type", _vdSessFilter.sessionType);
-          const url = `/api/anomaly-breakdown/${_vdReg}/` + (params.toString() ? "?"+params : "");
-          const fd  = await fetch(url).then(r => r.json());
-          const parts = [];
-          if (_vdSessFilter.detector)    parts.push(label);
-          if (_vdSessFilter.sessionType) parts.push(_vdSessFilter.sessionType);
-          await _vdRenderSignalChart(fd.by_signal,
-            parts.length ? `${parts.join(" · ")} — ${_vdReg}` : _vdReg);
-          _vdRefreshSessions();
-        });
-      }
-
+      // Click handler now lives inside _vdRenderDetectorChart (self-contained)
       await _vdRenderSignalChart(bdData.by_signal, reg);
     }
 
@@ -1297,7 +1654,21 @@ async function renderVDSection4(sessData, bdData, reg, container) {
   });
 }
 
-// ── Telemetry renderer (mirrors localhost loadTelemetry) ──────────────────
+// ── Detect time gaps in telemetry data ────────────────────────────────────
+// Returns indices i where a gap exists between ts[i-1] and ts[i]
+function detectTelGaps(timestamps, thresholdMs = 5 * 60 * 1000) {
+  const gaps = [];
+  for (let i = 1; i < timestamps.length; i++) {
+    const t0 = new Date(timestamps[i - 1]).getTime();
+    const t1 = new Date(timestamps[i]).getTime();
+    if (!isNaN(t0) && !isNaN(t1) && (t1 - t0) > thresholdMs) {
+      gaps.push(i);   // index of the first point AFTER the gap
+    }
+  }
+  return gaps;
+}
+
+// ── Telemetry renderer ────────────────────────────────────────────────────
 async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
   const section = document.getElementById("vdTelSection");
   const body    = document.getElementById("vdTelBody");
@@ -1318,17 +1689,41 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
   }
 
   const rows = d.rows;
-  const ts   = rows.map(r => r.ts||r.gps_time);
-  const isCharging = sessionType === "charging";
+  // Downsample if too many points (keep ≤500 for performance)
+  const MAX_PTS = 500;
+  const augRows = (() => {
+    let base = rows;
+    const isCharging = sessionType === "charging";
+    if (isCharging) {
+      base = base.map(r => ({
+        ...r,
+        _chg_pwr: (r.hves1_current!=null&&r.hves1_voltage_level!=null)
+          ? Math.abs(r.hves1_current*r.hves1_voltage_level)/1000 : null,
+      }));
+    }
+    if (base.length > MAX_PTS) {
+      const step = Math.ceil(base.length / MAX_PTS);
+      base = base.filter((_, i) => i % step === 0);
+    }
+    return base;
+  })();
 
-  let augRows = rows;
-  if (isCharging) {
-    augRows = rows.map(r => ({
-      ...r,
-      _chg_pwr: (r.hves1_current!=null&&r.hves1_voltage_level!=null)
-        ? Math.abs(r.hves1_current*r.hves1_voltage_level)/1000 : null,
-    }));
-  }
+  const ts         = augRows.map(r => r.ts||r.gps_time);
+  const isCharging = sessionType === "charging";
+  const gapIndices = detectTelGaps(ts);  // indices i where gap exists before ts[i]
+
+  // Energy summary from session cache
+  const sessData = (_vdSessCache?.sessions || []).find(s => String(s.session_id) === String(sessionId));
+  const energySummary = sessData
+    ? `<div style="display:flex;gap:16px;flex-wrap:wrap;padding:8px 12px;background:#f8fafc;
+        border-bottom:1px solid #e2e8f0;font-size:.75rem;color:#475569">
+        <span>Energy: <strong style="color:#0f172a">${sessData.energy_kwh != null ? sessData.energy_kwh.toFixed(2)+' kWh' : '—'}</strong></span>
+        <span>Efficiency: <strong style="color:#0f172a">${sessData.energy_per_km != null ? sessData.energy_per_km.toFixed(3)+' kWh/km' : '—'}</strong>
+          <span style="color:#94a3b8;font-size:.68rem">(same as energy/km)</span></span>
+        <span>Duration: <strong style="color:#0f172a">${sessData.duration_hr != null ? sessData.duration_hr.toFixed(2)+' hr' : '—'}</strong></span>
+        <span style="font-size:.68rem;color:#94a3b8">${gapIndices.length > 0 ? `⚠ ${gapIndices.length} data gap${gapIndices.length>1?"s":""} detected (dashed lines)` : "No data gaps detected"}</span>
+      </div>`
+    : "";
 
   const chartDefs = [
     { title:"SoC (%)",           fields:[{f:"soc",color:"#3b82f6",name:"SoC"}],                          yLabel:"%" },
@@ -1343,10 +1738,10 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
     ...(isCharging ? [{ title:"Charging Power (kW)", fields:[{f:"_chg_pwr",color:"#0ea5e9",name:"Chg Power"}], yLabel:"kW" }] : []),
   ];
 
-  const chartIds = chartDefs.map((_,i) => `vdTelChart_${i}`);
+  const chartIds = chartDefs.map((_, i) => `vdTelChart_${i}`);
   const pairs = [];
-  for (let i=0; i<chartDefs.length; i+=2) {
-    const L = chartDefs[i], R = chartDefs[i+1];
+  for (let i = 0; i < chartDefs.length; i += 2) {
+    const L = chartDefs[i], R = chartDefs[i + 1];
     pairs.push(`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
       <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
         <div style="padding:6px 12px;font-size:.72rem;font-weight:600;color:#475569;background:#f8fafc;border-bottom:1px solid #e2e8f0">${L.title}</div>
@@ -1358,7 +1753,7 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
       </div>` : '<div></div>'}
     </div>`);
   }
-  body.innerHTML = pairs.join("");
+  body.innerHTML = energySummary + pairs.join("");
 
   const TEL_LAYOUT = {
     paper_bgcolor:"transparent", plot_bgcolor:"#f8fafc",
@@ -1370,31 +1765,80 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
   };
 
   const syncIds = [];
-  chartDefs.forEach(({fields,yLabel,multi,bar,connectgaps},i) => {
+  // Progressive render: one chart per animation frame to keep UI responsive.
+  // Crosshair wiring runs after ALL charts are done (via onAllDone callback).
+  function renderChartAt(i, onAllDone) {
+    if (i >= chartDefs.length) { onAllDone && onAllDone(); return; }
+    const {fields, yLabel, multi, bar, connectgaps} = chartDefs[i];
     const id = chartIds[i];
-    const traces = fields
-      .filter(({f}) => augRows.some(r => r[f]!=null))
-      .map(({f,color,name}) => {
-        const t = { x:ts, y:augRows.map(r=>r[f]??null),
-                    type:bar?"bar":"scatter", name,
-                    hovertemplate:`%{x}<br>${name}: %{y:.3f}<extra></extra>` };
-        if (bar) t.marker={color};
-        else { t.mode="lines"; t.line={color,width:1.5}; if(connectgaps) t.connectgaps=true; }
-        return t;
-      });
+    const el = document.getElementById(id);
+    if (!el) { requestAnimationFrame(() => renderChartAt(i + 1, onAllDone)); return; }
+
+    const activeFields = fields.filter(({f}) => augRows.some(r => r[f] != null));
+
+    const traces = activeFields.map(({f, color, name}) => {
+      if (bar) {
+        return { x: ts, y: augRows.map(r => r[f] ?? null),
+                 type: "bar", name, marker: {color},
+                 hovertemplate: `%{x}<br>${name}: %{y:.3f}<extra></extra>` };
+      }
+      // Insert null at each gap index so Plotly breaks the solid line there
+      const rawY = augRows.map(r => r[f] ?? null);
+      const gappedX = [], gappedY = [];
+      let prev = 0;
+      for (const gi of gapIndices) {
+        gappedX.push(...ts.slice(prev, gi),   null);
+        gappedY.push(...rawY.slice(prev, gi), null);
+        prev = gi;
+      }
+      gappedX.push(...ts.slice(prev));
+      gappedY.push(...rawY.slice(prev));
+      return { x: gappedX, y: gappedY,
+               type: "scatter", mode: "lines", name,
+               line: {color, width: 1.5},
+               connectgaps: !!connectgaps,
+               hovertemplate: `%{x}<br>${name}: %{y:.3f}<extra></extra>` };
+    });
+
+    // Dashed bridge traces spanning each gap — one per field per gap
+    if (!bar) {
+      for (const {f, color} of activeFields) {
+        const rawY = augRows.map(r => r[f] ?? null);
+        for (const gi of gapIndices) {
+          const y0 = rawY[gi - 1], y1 = rawY[gi];
+          if (y0 != null && y1 != null) {
+            traces.push({ x: [ts[gi - 1], ts[gi]], y: [y0, y1],
+                          type: "scatter", mode: "lines",
+                          line: { color, width: 1.5, dash: "dash" },
+                          showlegend: false, hoverinfo: "skip" });
+          }
+        }
+      }
+    }
+
     if (!traces.length) {
-      document.getElementById(id).innerHTML =
-        `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:.8rem">No data</div>`;
+      el.innerHTML = `<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:.8rem">No data</div>`;
+      requestAnimationFrame(() => renderChartAt(i + 1, onAllDone));
       return;
     }
-    const layout = { ...TEL_LAYOUT, showlegend:!!(multi),
-      yaxis:{...TEL_LAYOUT.yaxis, title:{text:yLabel,font:{size:8.5}}} };
-    if (multi) layout.legend={orientation:"h",x:0.5,xanchor:"center",y:1.12,font:{size:9}};
-    Plotly.newPlot(id, traces, layout, {displayModeBar:false,responsive:true});
-    if (!bar) syncIds.push(id);
-  });
 
-  // Synchronized crosshair
+    const layout = {
+      ...TEL_LAYOUT,
+      showlegend: !!(multi),
+      yaxis: { ...TEL_LAYOUT.yaxis, title: { text: yLabel, font: { size: 8.5 } } },
+    };
+    if (multi) layout.legend = { orientation:"h", x:0.5, xanchor:"center", y:1.12, font:{size:9} };
+
+    Plotly.newPlot(id, traces, layout, {displayModeBar: false, responsive: true});
+    if (!bar) syncIds.push(id);
+
+    requestAnimationFrame(() => renderChartAt(i + 1, onAllDone));
+  }
+
+  requestAnimationFrame(() => renderChartAt(0, wireCrosshair));
+
+  // Synchronized crosshair — runs after all charts are rendered
+  function wireCrosshair() {
   syncIds.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -1418,4 +1862,5 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
       });
     });
   });
-}
+  }  // end wireCrosshair
+}    // end vdLoadTelemetry

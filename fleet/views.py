@@ -35,6 +35,7 @@ ANOM_COLS = [
     "cycle_soh", "ref_capacity_ah",
     "voltage_mean_new", "current_mean_new",
     "capacity_ah_discharge_new", "capacity_ah_charge_new", "capacity_ah_plugin_new",
+    "capacity_ah_charge_total_new",   # regen + plugin combined (feeds block SoH for charge blocks)
     # Block-level aggregates
     "block_capacity_ah", "block_odometer_km", "charging_rate_kw",
     # Subsystem health
@@ -63,22 +64,22 @@ TIER2 = ["MH18BZ2648", "MH18BZ3198", "MH18BZ2689", "MH18BZ2958"]
 TIER3 = ["MH18BZ2649", "MH18BZ3163", "MH18BZ3345", "MH18BZ2690", "MH18BZ2647"]
 
 TIER1_SIGNALS = {
-    "MH18BZ3028": "Lowest fleet SoH (94.97%); highest composite (0.658); 12 anomalies (13.2%) — IF=7, CUSUM=5",
-    "MH18BZ3392": "Slope -0.062%/day; RUL=280 days (<1 yr); composite=0.565; 12 anomalies (13.6%) — IF=8, CUSUM=5",
-    "MH18BZ3341": "3rd highest degradation score in fleet (0.514); 87 anomalies (14.2%) — IF=69, CUSUM=24; slope -0.029%/day",
+    "MH18BZ3028": "Lowest battery health in fleet (94.97%); highest degradation risk score (0.658); 12 flagged sessions (13.2% of total)",
+    "MH18BZ3392": "Fastest declining battery in fleet (−0.062%/day); projected replacement in under 1 year; 12 flagged sessions (13.6%)",
+    "MH18BZ3341": "3rd highest degradation risk in fleet (0.514); 87 flagged sessions (14.2%); rate of decline −0.029%/day",
 }
 TIER2_NOTES = {
-    "MH18BZ2648": "Highest raw anomaly count fleet-wide (124, 17.9%); CUSUM=51, EKF CUSUM=13; composite=0.479",
-    "MH18BZ3198": "Highest EKF CUSUM in fleet (14); slope -0.044%/day; RUL=390 days; 43 anomalies (8.4%)",
-    "MH18BZ2689": "61 anomalies (8.1%); composite=0.473; EKF CUSUM=7, CUSUM=27",
-    "MH18BZ2958": "36 anomalies (6.7%); composite=0.464; EKF CUSUM=6, CUSUM=26",
+    "MH18BZ2648": "Highest flagged session count in fleet (124, 17.9%); degradation risk score 0.479",
+    "MH18BZ3198": "Fastest declining in tier 2 (−0.044%/day); projected replacement in ~1 year; 43 flagged sessions (8.4%)",
+    "MH18BZ2689": "61 flagged sessions (8.1%); degradation risk score 0.473",
+    "MH18BZ2958": "36 flagged sessions (6.7%); degradation risk score 0.464",
 }
 TIER3_NOTES = {
-    "MH18BZ2649": "141 anomalies (15.8%) but slope near-flat (-0.002%/day); RUL=8147 days; IF=89, CUSUM=57",
-    "MH18BZ3163": "52 anomalies (8.1%); CUSUM=40, EKF CUSUM=2; composite=0.440; elevated IR",
-    "MH18BZ3345": "99 anomalies (13.3%); CUSUM=52, IF=54; near-flat slope (-0.018%/day)",
-    "MH18BZ2690": "84 anomalies (11.2%); IF-dominated (60); near-flat slope (-0.012%/day)",
-    "MH18BZ2647": "70 anomalies (10.6%); CUSUM=38, IF=35; RUL=1698 days; stable trajectory",
+    "MH18BZ2649": "141 flagged sessions (15.8%) but battery health nearly stable (−0.002%/day); long projected lifespan",
+    "MH18BZ3163": "52 flagged sessions (8.1%); degradation risk score 0.440; elevated internal resistance",
+    "MH18BZ3345": "99 flagged sessions (13.3%); near-flat health trajectory (−0.018%/day)",
+    "MH18BZ2690": "84 flagged sessions (11.2%); near-flat health trajectory (−0.012%/day)",
+    "MH18BZ2647": "70 flagged sessions (10.6%); stable long-term trajectory",
 }
 
 
@@ -160,6 +161,8 @@ def executive_summary_page(request):
 def api_overview(request):
     rul = _load_rul()
     ekf = _load_ekf()
+    anom = _load_anom()
+
     last_ekf = ekf.groupby("registration_number")["ekf_soh"].last()
     last_rul_days = ekf.groupby("registration_number")["ekf_rul_days"].last() \
         if "ekf_rul_days" in ekf.columns else pd.Series(dtype=float)
@@ -169,6 +172,33 @@ def api_overview(request):
     first_soh = ekf_sorted.groupby("registration_number")["ekf_soh"].first().mean()
     last_soh  = ekf_sorted.groupby("registration_number")["ekf_soh"].last().mean()
     soh_trend_pct = round(float(last_soh - first_soh), 2)
+
+    # Session counts
+    total_sessions    = len(anom)
+    charging_sessions  = int((anom["session_type"] == "charging").sum())  if "session_type" in anom.columns else None
+    discharge_sessions = int((anom["session_type"] == "discharge").sum()) if "session_type" in anom.columns else None
+
+    # EKF RUL interquartile range across vehicles
+    ekf_rul_p25 = ekf_rul_p75 = None
+    if last_rul_days.notna().any():
+        rul_vals = last_rul_days.dropna()
+        ekf_rul_p25 = round(float(rul_vals.quantile(0.25)), 0)
+        ekf_rul_p75 = round(float(rul_vals.quantile(0.75)), 0)
+
+    # Remaining EFC: estimate per vehicle = (daily EFC rate) × EKF RUL days
+    remaining_efc_per_veh = []
+    if all(c in anom.columns for c in ["cum_efc", "days_since_first", "registration_number"]) \
+            and "start_time" in anom.columns:
+        latest_sess = (anom.sort_values("start_time")
+                       .groupby("registration_number")[["cum_efc", "days_since_first"]]
+                       .last())
+        for reg, row in latest_sess.iterrows():
+            rul_d = last_rul_days.get(reg)
+            if rul_d is not None and not math.isnan(float(rul_d)) and float(row["days_since_first"]) > 0:
+                daily_rate = float(row["cum_efc"]) / float(row["days_since_first"])
+                remaining_efc_per_veh.append(round(daily_rate * float(rul_d), 1))
+    fleet_median_remaining_efc = (round(float(np.median(remaining_efc_per_veh)), 1)
+                                  if remaining_efc_per_veh else None)
 
     return JsonResponse({
         "n_vehicles":      int(rul["registration_number"].nunique()),
@@ -182,6 +212,8 @@ def api_overview(request):
                            if rul["rul_days"].notna().any() else None,
         "median_ekf_rul":  round(float(last_rul_days.median()), 0)
                            if last_rul_days.notna().any() else None,
+        "ekf_rul_p25":     ekf_rul_p25,
+        "ekf_rul_p75":     ekf_rul_p75,
         "soh_trend_pct":   soh_trend_pct,
         "first_soh":       round(float(first_soh), 3),
         "last_soh":        round(float(last_soh), 3),
@@ -189,6 +221,11 @@ def api_overview(request):
         "cycle_soh_obs_pct": 19.5,
         "cycle_soh_total":   7745,
         "eol_threshold":     80.0,
+        "total_sessions":    total_sessions,
+        "charging_sessions": charging_sessions,
+        "discharge_sessions": discharge_sessions,
+        "fleet_median_remaining_efc": fleet_median_remaining_efc,
+        "remaining_efc_per_veh":      remaining_efc_per_veh,
     })
 
 
@@ -250,6 +287,16 @@ def api_vehicles(request):
     live = _live_anom_counts()
     df["n_combined_anom"] = df["registration_number"].map(live).fillna(0).astype(int)
     df = df.sort_values("composite_degradation_score", ascending=False)
+
+    # Attach EKF RUL (last value per vehicle from ekf_soh.csv) so the
+    # histogram on the executive summary uses the same model as the KPI card
+    ekf = _load_ekf()
+    if "ekf_rul_days" in ekf.columns:
+        last_ekf_rul = (ekf.groupby("registration_number")["ekf_rul_days"]
+                        .last()
+                        .rename("ekf_rul_days"))
+        df = df.merge(last_ekf_rul, on="registration_number", how="left")
+
     return _safe_json({"vehicles": _df_to_records(df)})
 
 
@@ -276,6 +323,18 @@ def api_bayes_coef(request, reg=None):
         "vehicle": {k: round(float(v), 6) for k, v in veh_coef.items()},
         "registration_number": reg,
     })
+
+
+@require_GET
+def api_soh_scatter(request):
+    """Per-session BMS-reported SoH vs EKF SoH for the scatter plot."""
+    anom = _load_anom()
+    cols = ["registration_number", "soh", "ekf_soh"]
+    avail = [c for c in cols if c in anom.columns]
+    df = anom[avail].dropna()
+    if len(df) > 2000:
+        df = df.sample(2000, random_state=42)
+    return _safe_json({"points": _df_to_records(df)})
 
 
 @require_GET
@@ -362,6 +421,7 @@ def api_sessions(request, reg):
         "energy_kwh", "n_low_soc",
         "ref_capacity_ah", "voltage_mean_new", "current_mean_new",
         "capacity_ah_discharge_new", "capacity_ah_charge_new", "capacity_ah_plugin_new",
+        "capacity_ah_charge_total_new",
         "cycle_soh", "block_capacity_ah", "block_odometer_km", "charging_rate_kw",
         "cell_spread_max", "weak_subsystem_consistency", "hot_subsystem_consistency",
         "subsystem_voltage_std", "temp_rise_rate", "bms_coverage",

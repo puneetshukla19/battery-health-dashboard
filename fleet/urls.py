@@ -11,6 +11,7 @@ urlpatterns = [
     path("api/vehicles/",              views.api_vehicles,      name="api-vehicles"),
     path("api/bayes-coef/",            views.api_bayes_coef,    name="api-bayes-coef"),
     path("api/bayes-coef/<str:reg>/",  views.api_bayes_coef,    name="api-bayes-coef-veh"),
+    path("api/soh-scatter/",              views.api_soh_scatter,       name="api-soh-scatter"),
     path("api/anomaly-tiers/",         views.api_anomaly_tiers,      name="api-anomaly-tiers"),
     path("api/anomaly-breakdown/",              views.api_anomaly_breakdown, name="api-anomaly-breakdown"),
     path("api/anomaly-breakdown/<str:reg>/",    views.api_anomaly_breakdown, name="api-anomaly-breakdown-veh"),
