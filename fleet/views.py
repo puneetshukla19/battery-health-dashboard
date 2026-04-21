@@ -44,6 +44,7 @@ ANOM_COLS = [
     # Usage / aging
     "speed_mean", "is_loaded", "odometer_km", "days_since_first",
     "cum_efc", "aging_index", "dod_stress", "thermal_stress", "c_rate_chg",
+    "block_soc_diff",
     # EWM-smoothed signals
     "ir_ohm_mean_ewm10", "cell_spread_mean_ewm10", "temp_rise_rate_ewm10",
     "vsag_rate_per_hr", "vsag_rate_per_hr_ewm10", "ir_event_rate",
@@ -59,27 +60,28 @@ ANOM_COLS = [
 COEF_HIDE = ["efc_x_days", "ir_ohm_mean", "cell_spread_mean",
              "temp_rise_rate", "vsag_rate_per_hr"]
 
-TIER1 = ["MH18BZ3028", "MH18BZ3392", "MH18BZ3341"]
-TIER2 = ["MH18BZ2648", "MH18BZ3198", "MH18BZ2689", "MH18BZ2958"]
-TIER3 = ["MH18BZ2649", "MH18BZ3163", "MH18BZ3345", "MH18BZ2690", "MH18BZ2647"]
+TIER1 = ["MH18BZ3028", "MH18BZ3341", "MH18BZ3392"]
+TIER2 = ["MH18BZ3369", "MH18BZ3201", "MH18BZ3034", "MH18BZ3163", "MH18BZ3345"]
+TIER3 = ["MH18BZ2874", "MH18BZ3386", "MH18BZ3384", "MH18BZ3160", "MH18BZ3198"]
 
 TIER1_SIGNALS = {
-    "MH18BZ3028": "Lowest battery health in fleet (94.97%); highest degradation risk score (0.658); 12 flagged sessions (13.2% of total)",
-    "MH18BZ3392": "Fastest declining battery in fleet (−0.062%/day); projected replacement in under 1 year; 12 flagged sessions (13.6%)",
-    "MH18BZ3341": "3rd highest degradation risk in fleet (0.514); 87 flagged sessions (14.2%); rate of decline −0.029%/day",
+    "MH18BZ3028": "Lowest EKF SoH in fleet (89.87%) — 5+ pp below median; highest degradation risk score (0.461); 17 flagged sessions (18.7% of total)",
+    "MH18BZ3341": "EKF SoH 95.57%; degradation risk score 0.309; declining at -0.34%/day; EKF RUL 3.5 years; 65 flagged sessions (10.6%)",
+    "MH18BZ3392": "EKF SoH 93.50% — 2nd lowest in fleet; degradation risk score 0.281; 11 flagged sessions (12.5%); SoH baseline significantly reduced",
 }
 TIER2_NOTES = {
-    "MH18BZ2648": "Highest flagged session count in fleet (124, 17.9%); degradation risk score 0.479",
-    "MH18BZ3198": "Fastest declining in tier 2 (−0.044%/day); projected replacement in ~1 year; 43 flagged sessions (8.4%)",
-    "MH18BZ2689": "61 flagged sessions (8.1%); degradation risk score 0.473",
-    "MH18BZ2958": "36 flagged sessions (6.7%); degradation risk score 0.464",
+    "MH18BZ3369": "EKF SoH 93.73%; degradation risk score 0.276; 12 flagged sessions (20.7% flag rate — highest in tier); EKF RUL 15.7 years",
+    "MH18BZ3201": "EKF SoH 95.35%; degradation risk score 0.271; EKF RUL 2.3 years — shortest in tier; 85 flagged sessions (12.2%)",
+    "MH18BZ3034": "EKF SoH 95.39%; degradation risk score 0.239; EKF RUL 3.1 years; 40 flagged sessions (6.5%)",
+    "MH18BZ3163": "EKF SoH 95.61%; degradation risk score 0.238; 62 flagged sessions (9.6%); elevated internal resistance pattern",
+    "MH18BZ3345": "EKF SoH 96.96%; degradation risk score 0.228; 102 flagged sessions (13.7%); EKF RUL 2.5 years",
 }
 TIER3_NOTES = {
-    "MH18BZ2649": "141 flagged sessions (15.8%) but battery health nearly stable (−0.002%/day); long projected lifespan",
-    "MH18BZ3163": "52 flagged sessions (8.1%); degradation risk score 0.440; elevated internal resistance",
-    "MH18BZ3345": "99 flagged sessions (13.3%); near-flat health trajectory (−0.018%/day)",
-    "MH18BZ2690": "84 flagged sessions (11.2%); near-flat health trajectory (−0.012%/day)",
-    "MH18BZ2647": "70 flagged sessions (10.6%); stable long-term trajectory",
+    "MH18BZ2874": "EKF SoH 97.78%; degradation risk score 0.227; 22 flagged sessions (4.3%); EKF RUL 4.4 years",
+    "MH18BZ3386": "EKF SoH 97.05%; degradation risk score 0.227; 105 flagged sessions (13.9%); EKF RUL 2.3 years",
+    "MH18BZ3384": "EKF SoH 96.76%; degradation risk score 0.227; 24 flagged sessions (4.8%); EKF RUL 3.7 years",
+    "MH18BZ3160": "EKF SoH 96.37%; degradation risk score 0.208; 37 flagged sessions (6.6%); recent declining SoH trend",
+    "MH18BZ3198": "EKF SoH 95.57%; degradation risk score 0.207; 51 flagged sessions (10.0%); EKF RUL 3.0 years",
 }
 
 
@@ -255,7 +257,7 @@ def api_quintiles(request):
     ekf = _load_ekf()
     ekf = ekf.copy()
     ekf["q"], bins = pd.qcut(
-        ekf["days_since_first_session"], q=5,
+        ekf["days_since_first_session"], q=8,
         labels=False, retbins=True, duplicates="drop"
     )
     labels = [f"Q{i+1} ({bins[i]:.0f}-{bins[i+1]:.0f}d)"
@@ -267,7 +269,7 @@ def api_quintiles(request):
         .reset_index()
         .rename(columns={"ekf_soh": "median_soh"})
     )
-    qt["_q"] = qt["quintile"].str.extract(r"Q(\d)").astype(int)
+    qt["_q"] = qt["quintile"].str.extract(r"Q(\d+)").astype(int)
     qt = qt.sort_values("_q").drop(columns=["_q"])
     return JsonResponse({"quintiles": qt.to_dict(orient="records")})
 
@@ -312,6 +314,17 @@ def api_bayes_coef(request, reg=None):
                  if c != "registration_number" and c not in COEF_HIDE]
     global_coef = coef[feat_cols].median().dropna()
 
+    # Cross-vehicle spread (IQR) for CI forest plot
+    coef_spread = {}
+    for feat in feat_cols:
+        vals = coef[feat].dropna()
+        if len(vals) >= 1:
+            coef_spread[feat] = {
+                "p25": round(float(vals.quantile(0.25)), 6),
+                "p75": round(float(vals.quantile(0.75)), 6),
+                "std": round(float(vals.std()), 6) if len(vals) >= 2 else 0.0,
+            }
+
     veh_coef = {}
     if reg:
         row = coef[coef["registration_number"] == reg]
@@ -321,6 +334,7 @@ def api_bayes_coef(request, reg=None):
     return JsonResponse({
         "global": {k: round(float(v), 6) for k, v in global_coef.items()},
         "vehicle": {k: round(float(v), 6) for k, v in veh_coef.items()},
+        "coef_spread": coef_spread,
         "registration_number": reg,
     })
 
@@ -329,17 +343,141 @@ def api_bayes_coef(request, reg=None):
 def api_soh_scatter(request):
     """Per-session BMS-reported SoH vs EKF SoH for the scatter plot."""
     anom = _load_anom()
-    cols = ["registration_number", "soh", "ekf_soh"]
+    cols = ["registration_number", "soh", "ekf_soh", "start_time_ist", "cum_efc"]
     avail = [c for c in cols if c in anom.columns]
-    df = anom[avail].dropna()
-    if len(df) > 2000:
-        df = df.sample(2000, random_state=42)
+    df = anom[avail].dropna(subset=["soh", "ekf_soh"]).copy()
+    if "start_time_ist" in df.columns:
+        df["date"] = pd.to_datetime(df["start_time_ist"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if len(df) > 3000:
+        df = df.sample(3000, random_state=42)
     return _safe_json({"points": _df_to_records(df)})
+
+
+@require_GET
+def api_soh_delta_trend(request):
+    """Daily (EKF SoH − BMS SoH) delta — uses ekf_soh.csv for full date coverage."""
+    anom = _load_anom()
+    ekf  = _load_ekf()  # has "date" col from start_time ms
+
+    # EKF SoH daily median per vehicle (full historical range from ekf_soh.csv)
+    ekf_day = (
+        ekf[["registration_number", "date", "ekf_soh"]].dropna(subset=["ekf_soh"])
+        .groupby(["registration_number", "date"])["ekf_soh"].median().reset_index()
+    )
+
+    # BMS SoH daily median per vehicle from anomaly_scores.csv
+    bms_ok = "soh" in anom.columns and "start_time_ist" in anom.columns
+    if bms_ok:
+        bms = anom[["registration_number", "soh", "start_time_ist"]].dropna(subset=["soh"]).copy()
+        bms["date"] = pd.to_datetime(bms["start_time_ist"], errors="coerce").dt.strftime("%Y-%m-%d")
+        bms_day = bms.groupby(["registration_number", "date"])["soh"].median().reset_index()
+    else:
+        bms_day = pd.DataFrame(columns=["registration_number", "date", "soh"])
+
+    # Left-join so all EKF dates are retained; delta is NaN where BMS unavailable
+    merged = ekf_day.merge(bms_day, on=["registration_number", "date"], how="left")
+    merged["delta"] = (merged["ekf_soh"] - merged["soh"]).round(3)
+
+    # Fleet daily median delta — only for days where at least one vehicle has both values
+    delta_by_date = (
+        merged.dropna(subset=["delta"])
+        .groupby("date")["delta"].median()
+    )
+    all_dates = sorted(ekf_day["date"].unique())
+    fleet_records = [
+        {"date": d, "fleet_median_delta": (round(float(delta_by_date[d]), 3) if d in delta_by_date else None)}
+        for d in all_dates
+    ]
+
+    # Per-vehicle records for slider mode (only where delta is non-null)
+    veh_records = _df_to_records(
+        merged.dropna(subset=["delta"])[["registration_number", "date", "delta"]]
+        .sort_values(["registration_number", "date"])
+    )
+    return _safe_json({
+        "fleet_trend": fleet_records,
+        "vehicle_points": veh_records,
+    })
+
+
+@require_GET
+@require_GET
+def api_efc_trend(request):
+    """EFC over time per vehicle + per-vehicle EOL projection."""
+    from datetime import timedelta
+    anom = _load_anom()
+    ekf  = _load_ekf()
+
+    cols  = ["registration_number", "start_time_ist", "cum_efc", "days_since_first"]
+    avail = [c for c in cols if c in anom.columns]
+    df = anom[avail].dropna(subset=["cum_efc"]).copy()
+    df["date"] = pd.to_datetime(df["start_time_ist"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df = df.dropna(subset=["date"])
+
+    # Fleet daily median EFC
+    fleet = (df.groupby("date")["cum_efc"]
+               .median().reset_index()
+               .rename(columns={"cum_efc": "fleet_median_cum_efc"})
+               .sort_values("date"))
+
+    # Per-vehicle daily last EFC (one row per vehicle per day to reduce payload)
+    veh_pts = (df.sort_values("start_time_ist")
+                 .groupby(["registration_number", "date"])["cum_efc"]
+                 .last().reset_index()
+                 .sort_values(["registration_number", "date"]))
+
+    # Latest EKF RUL and SoH per vehicle
+    ekf_rul_map = {}
+    ekf_soh_map = {}
+    if "ekf_rul_days" in ekf.columns:
+        ekf_rul_map = ekf.groupby("registration_number")["ekf_rul_days"].last().dropna().to_dict()
+    if "ekf_soh" in ekf.columns:
+        ekf_soh_map = ekf.groupby("registration_number")["ekf_soh"].last().dropna().to_dict()
+
+    last_date_map = df.groupby("registration_number")["date"].last().to_dict()
+    last_sess = (df.sort_values("start_time_ist")
+                   .groupby("registration_number")[["cum_efc", "days_since_first"]]
+                   .last())
+
+    projections = []
+    for reg, row in last_sess.iterrows():
+        rul       = ekf_rul_map.get(reg)
+        cur_efc   = float(row["cum_efc"])
+        days      = float(row["days_since_first"]) if pd.notna(row["days_since_first"]) and float(row["days_since_first"]) > 0 else None
+        ld        = last_date_map.get(reg)
+        ekf_soh   = ekf_soh_map.get(reg)
+        efc_rate  = (cur_efc / days) if days else None
+
+        proj_efc = proj_date = None
+        if rul is not None and not math.isnan(float(rul)) and efc_rate:
+            proj_efc = cur_efc + efc_rate * float(rul)
+            try:
+                proj_date = (pd.to_datetime(ld).date() + timedelta(days=int(float(rul)))).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+        projections.append({
+            "registration_number":   reg,
+            "current_cum_efc":       round(cur_efc, 1),
+            "efc_daily_rate":        round(efc_rate, 5) if efc_rate else None,
+            "ekf_rul_days":          round(float(rul), 0) if rul is not None and not math.isnan(float(rul)) else None,
+            "current_ekf_soh":       round(float(ekf_soh), 2) if ekf_soh is not None else None,
+            "projected_efc_at_eol":  round(proj_efc, 1) if proj_efc else None,
+            "last_date":             ld,
+            "proj_date":             proj_date,
+        })
+
+    return _safe_json({
+        "fleet_trend":     fleet.to_dict(orient="records"),
+        "vehicle_points":  _df_to_records(veh_pts),
+        "projections":     projections,
+    })
 
 
 @require_GET
 def api_anomaly_tiers(request):
     rul = _load_rul()
+    ekf = _load_ekf()
     anom = _load_anom()
     cusum = anom.groupby("registration_number").agg(
         cusum_ekf=("cusum_ekf_soh_alarm", "sum"),
@@ -347,17 +485,29 @@ def api_anomaly_tiers(request):
     ).reset_index()
     live = _live_anom_counts()
 
+    # Latest EKF RUL per vehicle
+    ekf_rul_map = {}
+    if "ekf_rul_days" in ekf.columns:
+        ekf_rul_map = (
+            ekf.groupby("registration_number")["ekf_rul_days"]
+            .last()
+            .dropna()
+            .to_dict()
+        )
+
     def veh_row(reg):
         r = rul[rul["registration_number"] == reg]
         if r.empty:
             return {"registration_number": reg}
         r = r.iloc[0]
+        ekf_rul = ekf_rul_map.get(reg)
         return {
             "registration_number": reg,
             "current_soh":     round(float(r.get("current_soh", 0) or 0), 2),
             "soh_slope":       round(float(r.get("soh_slope_%per_day", 0) or 0), 5),
             "composite":       round(float(r.get("composite_degradation_score", 0) or 0), 4),
             "n_combined_anom": live.get(reg, 0),
+            "rul_days":        round(float(ekf_rul), 0) if ekf_rul is not None and not math.isnan(float(ekf_rul)) else None,
         }
 
     tier1 = []
@@ -422,10 +572,11 @@ def api_sessions(request, reg):
         "ref_capacity_ah", "voltage_mean_new", "current_mean_new",
         "capacity_ah_discharge_new", "capacity_ah_charge_new", "capacity_ah_plugin_new",
         "capacity_ah_charge_total_new",
-        "cycle_soh", "block_capacity_ah", "block_odometer_km", "charging_rate_kw",
+        "cycle_soh", "block_capacity_ah", "odometer_km", "block_odometer_km", "charging_rate_kw",
         "cell_spread_max", "weak_subsystem_consistency", "hot_subsystem_consistency",
         "subsystem_voltage_std", "temp_rise_rate", "bms_coverage",
         "speed_mean", "is_loaded", "cum_efc", "days_since_first", "aging_index",
+        "block_soc_diff",
         # EWM & trends
         "vsag_rate_per_hr", "ir_event_rate",
         "ir_ohm_mean_ewm10", "cell_spread_mean_ewm10", "temp_rise_rate_ewm10",
@@ -439,10 +590,15 @@ def api_sessions(request, reg):
         # Filter-only fields (not displayed but needed client-side)
         "n_high_ir",
     ]
+    # Compute soc_diff = soc_start − soc_end (positive = battery discharged)
+    if "soc_start" in veh.columns and "soc_end" in veh.columns:
+        veh["soc_diff"] = (veh["soc_start"] - veh["soc_end"]).round(1)
+
     total = len(veh)
     # Keep only anomalous sessions for display (no cap — show all)
     anom_veh = veh[veh["is_anomalous"]]
-    show = [c for c in SHOW if c in anom_veh.columns]
+    show_cols = SHOW + ["soc_diff"]
+    show = [c for c in show_cols if c in anom_veh.columns]
     return _safe_json({
         "registration_number": reg,
         "total_sessions": total,
@@ -464,6 +620,16 @@ def api_anomaly_breakdown(request, reg=None):
         anom_only = anom[anom["anomaly"].fillna(False).astype(bool)]
     else:
         anom_only = anom
+
+    # Optional: filter by date range
+    date_from = request.GET.get("date_from", None)
+    date_to   = request.GET.get("date_to",   None)
+    if (date_from or date_to) and "start_time_ist" in anom_only.columns:
+        dates = anom_only["start_time_ist"].astype(str).str[:10]
+        if date_from:
+            anom_only = anom_only[dates >= date_from]
+        if date_to:
+            anom_only = anom_only[dates <= date_to]
 
     # Optional: filter by session type ("charging" or "discharge")
     session_type = request.GET.get("session_type", None)
@@ -514,28 +680,29 @@ def api_anomaly_breakdown(request, reg=None):
         "CUSUM": cusum_any,
     }
 
+    IF_MAP = [
+        ("IR Degradation",          ["n_high_ir", "ir_ohm_mean", "d_n_high_ir", "ir_event_rate", "d_ir_ohm"]),
+        ("Voltage Sag",             ["n_vsag", "d_vsag_per_cycle"]),
+        ("Cell Spread / Imbalance", ["cell_spread", "n_cell_spread_warn", "subsystem_voltage_std"]),
+        ("Thermal Stress",          ["temp_lowest_mean", "temp_max", "temp_rise_rate", "thermal_stress"]),
+        ("Efficiency / Capacity",   ["energy_per_loaded_session", "capacity_ah_discharge"]),
+        ("High DoD",                ["dod_stress"]),
+        ("Low SoC / Undervoltage",  ["n_low_soc", "voltage_min"]),
+        ("SoH Decline",             ["capacity_soh_disc_new", "soh_smooth", "ekf_soh_delta", "cycle_soh"]),
+        ("Usage Pattern",           ["odometer_km", "duration_hr"]),
+    ]
+
     # By physical signal — IF uses if_reason text; CUSUM uses alarm columns.
     if detector == "if" and "if_reason" in anom_only.columns:
         reasons = anom_only["if_reason"].fillna("")
-        IF_MAP = [
-            ("IR Degradation",          ["n_high_ir", "ir_ohm_mean", "d_n_high_ir", "ir_event_rate", "d_ir_ohm"]),
-            ("Voltage Sag",             ["n_vsag", "d_vsag_per_cycle"]),
-            ("Cell Spread / Imbalance", ["cell_spread", "n_cell_spread_warn", "subsystem_voltage_std"]),
-            ("Thermal Stress",          ["temp_lowest_mean", "temp_max", "temp_rise_rate", "thermal_stress"]),
-            ("Efficiency / Capacity",   ["energy_per_loaded_session", "capacity_ah_discharge"]),
-            ("High DoD",                ["dod_stress"]),
-            ("Low SoC / Undervoltage",  ["n_low_soc", "voltage_min"]),
-            ("SoH Decline",             ["capacity_soh_disc_new", "soh_smooth", "ekf_soh_delta", "cycle_soh"]),
-            ("Usage Pattern",           ["odometer_km", "duration_hr"]),
-        ]
         by_signal = {}
         for label, keywords in IF_MAP:
             pattern = "|".join(keywords)
             n = int(reasons.str.contains(pattern, case=False, na=False).sum())
             if n > 0:
                 by_signal[label] = n
-    else:
-        # CUSUM-based breakdown — each category uses OR logic, counts per session
+    elif detector == "cusum":
+        # Pure CUSUM-based breakdown
         by_signal = {k: v for k, v in {
             "EKF SoH Decline": cnt("cusum_ekf_soh_alarm"),
             "BMS SoH Decline": cnt("cusum_soh_alarm"),
@@ -546,6 +713,33 @@ def api_anomaly_breakdown(request, reg=None):
             "Efficiency Loss": cnt("cusum_epk_alarm"),
             "Voltage Sag":     cnt("n_vsag"),
         }.items() if v > 0}
+    else:
+        # Default (no detector filter): merge IF + CUSUM signal counts
+        cusum_signals = {
+            "EKF SoH Decline": cnt("cusum_ekf_soh_alarm"),
+            "BMS SoH Decline": cnt("cusum_soh_alarm"),
+            "Cycle SoH Drop":  cnt("cusum_cycle_soh_alarm"),
+            "IR Degradation":  cnt_any("cusum_ir_slope_alarm", "n_high_ir"),
+            "Cell Spread":     cnt_any("cusum_spread_alarm", "cusum_spread_slope_alarm"),
+            "Thermal Stress":  cnt("cusum_heat_alarm"),
+            "Efficiency Loss": cnt("cusum_epk_alarm"),
+            "Voltage Sag":     cnt("n_vsag"),
+        }
+        if_signals = {}
+        if "if_reason" in anom_only.columns:
+            if_mask = anom_only["if_anomaly"].fillna(False).astype(bool) if "if_anomaly" in anom_only.columns else pd.Series(False, index=anom_only.index)
+            if_rows = anom_only[if_mask]
+            reasons = if_rows["if_reason"].fillna("")
+            for label, keywords in IF_MAP:
+                pattern = "|".join(keywords)
+                n = int(reasons.str.contains(pattern, case=False, na=False).sum())
+                if n > 0:
+                    if_signals[label] = n
+        # Merge: sum counts for overlapping labels
+        merged = dict(cusum_signals)
+        for label, n in if_signals.items():
+            merged[label] = merged.get(label, 0) + n
+        by_signal = {k: v for k, v in merged.items() if v > 0}
 
     return JsonResponse({"by_detector": by_detector, "by_signal": by_signal})
 
@@ -575,7 +769,18 @@ def api_soh_bands(request, reg):
         )
         disc_ekf = _df_to_records(disc)
 
-    return _safe_json({"reg": reg, "bands": _df_to_records(df[cols]), "discharge_ekf": disc_ekf})
+    # Per-session BMS-reported SoH from anomaly_scores.csv (all session types)
+    bms_obs = []
+    if "soh" in anom.columns and "start_time_ist" in anom.columns:
+        bms_df = (
+            anom[anom["registration_number"] == reg][["start_time_ist", "soh"]]
+            .dropna(subset=["soh"])
+            .rename(columns={"start_time_ist": "date", "soh": "bms_soh"})
+            .sort_values("date")
+        )
+        bms_obs = _df_to_records(bms_df)
+
+    return _safe_json({"reg": reg, "bands": _df_to_records(df[cols]), "discharge_ekf": disc_ekf, "bms_obs": bms_obs})
 
 
 @require_GET
@@ -608,4 +813,140 @@ def api_telemetry(request, reg, session_id):
         "session_id": session_id,
         "session_type": str(df["session_type"].iloc[0]) if "session_type" in df.columns else None,
         "rows": _df_to_records(df),
+    })
+
+
+# ── RUL Timeline (per-vehicle, charging sessions) ─────────────────────────────
+@require_GET
+def api_rul_timeline(request, reg):
+    ekf = _load_ekf()
+    df  = ekf[ekf["registration_number"] == reg].sort_values("start_time").copy()
+    if df.empty:
+        return JsonResponse({"error": f"No EKF data for {reg}"}, status=404)
+
+    cols = ["date", "ekf_rul_days"]
+    if "ekf_rul_days_lo" in df.columns: cols.append("ekf_rul_days_lo")
+    if "ekf_rul_days_hi" in df.columns: cols.append("ekf_rul_days_hi")
+    if "ekf_soh"         in df.columns: cols.append("ekf_soh")
+
+    rows = _df_to_records(df[cols])
+    return _safe_json({"reg": reg, "points": rows})
+
+
+# ── Breakdown Timeline ─────────────────────────────────────────────────────────
+@require_GET
+def api_breakdown_timeline(request):
+    rul  = _load_rul()
+    ekf  = _load_ekf()
+    EOL  = 80.0  # end-of-life SoH threshold
+
+    # Reference date = last session date in EKF data
+    ref_ts = pd.to_datetime(ekf["start_time"], unit="ms").max()
+    ref_date_str = ref_ts.strftime("%Y-%m-%d")
+
+    # Latest EKF SoH + RUL per vehicle (for display)
+    ekf_rul_cols = ["ekf_soh", "ekf_soh_std", "ekf_rul_days"]
+    for _c in ("ekf_rul_days_lo", "ekf_rul_days_hi"):
+        if _c in ekf.columns:
+            ekf_rul_cols.append(_c)
+    last_ekf = (
+        ekf.sort_values("start_time")
+           .groupby("registration_number")[ekf_rul_cols]
+           .last()
+    )
+
+    # Data span per vehicle: first → last session date
+    ekf_ts = pd.to_datetime(ekf["start_time"], unit="ms")
+    span_df = ekf.copy()
+    span_df["_ts"] = ekf_ts
+    span_grp = span_df.groupby("registration_number")["_ts"].agg(["min", "max"])
+    span_grp["span_days"] = (span_grp["max"] - span_grp["min"]).dt.days
+    span_grp["first_date"] = span_grp["min"].dt.strftime("%Y-%m-%d")
+    span_grp["last_date"]  = span_grp["max"].dt.strftime("%Y-%m-%d")
+
+    def _add_days(base_ts, days):
+        if days is None or not math.isfinite(float(days)):
+            return None
+        return (base_ts + pd.Timedelta(days=float(days))).strftime("%Y-%m-%d")
+
+    rows = []
+    for _, r in rul.iterrows():
+        reg        = r["registration_number"]
+        curr_soh   = r.get("current_soh")
+        slope      = r.get("soh_slope_%per_day")
+        composite  = r.get("composite_degradation_score")
+
+        ekf_row   = last_ekf.loc[reg] if reg in last_ekf.index else None
+        ekf_soh   = float(ekf_row["ekf_soh"])     if ekf_row is not None and pd.notna(ekf_row["ekf_soh"])     else None
+        ekf_std   = float(ekf_row["ekf_soh_std"]) if ekf_row is not None and pd.notna(ekf_row["ekf_soh_std"]) else None
+        # Use EKF RUL (consistent with KPI card and anomaly tiers)
+        rul_days  = float(ekf_row["ekf_rul_days"]) if ekf_row is not None and pd.notna(ekf_row["ekf_rul_days"]) else None
+        rul_lo    = float(ekf_row["ekf_rul_days_lo"]) if ekf_row is not None and "ekf_rul_days_lo" in ekf_row.index and pd.notna(ekf_row["ekf_rul_days_lo"]) else None
+        rul_hi    = float(ekf_row["ekf_rul_days_hi"]) if ekf_row is not None and "ekf_rul_days_hi" in ekf_row.index and pd.notna(ekf_row["ekf_rul_days_hi"]) else None
+
+        tier = 1 if reg in TIER1 else (2 if reg in TIER2 else (3 if reg in TIER3 else 0))
+
+        span_row = span_grp.loc[reg] if reg in span_grp.index else None
+        data_span = {
+            "first": span_row["first_date"],
+            "last":  span_row["last_date"],
+            "days":  int(span_row["span_days"]),
+        } if span_row is not None else None
+
+        rows.append({
+            "registration_number": reg,
+            "current_soh": round(float(curr_soh), 2) if curr_soh is not None and pd.notna(curr_soh) else None,
+            "soh_slope":   round(float(slope), 5)    if slope    is not None and pd.notna(slope)    else None,
+            "ekf_soh":     round(ekf_soh, 2)   if ekf_soh  is not None else None,
+            "ekf_soh_std": round(ekf_std, 4)   if ekf_std  is not None else None,
+            "composite":   round(float(composite), 4) if composite is not None and pd.notna(composite) else None,
+            "rul_days":    round(rul_days, 0)   if rul_days is not None else None,
+            "rul_lo":      round(rul_lo, 0)     if rul_lo   is not None else None,
+            "rul_hi":      round(rul_hi, 0)     if rul_hi   is not None else None,
+            "eol_date":    _add_days(ref_ts, rul_days),
+            "tier":        tier,
+            "ref_date":    ref_date_str,
+            "data_span":   data_span,
+        })
+
+    # Sort soonest-first (None / no-slope vehicles last)
+    rows.sort(key=lambda x: (x["rul_days"] is None, x["rul_days"] or float("inf")))
+
+    return _safe_json({"timeline": rows, "ref_date": ref_date_str})
+
+
+# ── Data Distributions ─────────────────────────────────────────────────────────
+@require_GET
+def api_distributions(request):
+    anom = _load_anom()
+
+    csoh_vals      = []
+    block_soh_vals = []
+
+    if "cycle_soh" in anom.columns:
+        # Per-session quality gate: block DoD >= 20%, exclude ceiling artefact
+        mask = anom["cycle_soh"].notna() & (anom["cycle_soh"] < 99.5)
+        if "block_soc_diff" in anom.columns:
+            mask = mask & (anom["block_soc_diff"].abs() >= 20)
+        csoh_vals = anom.loc[mask, "cycle_soh"].round(3).tolist()
+
+        # Block SoH: deduplicate to one value per discharge block
+        # Use (registration_number, block_capacity_ah) as a proxy block key —
+        # different blocks have different total Ah, so this gives ~one value per block.
+        dedup_cols = ["registration_number"]
+        if "block_capacity_ah" in anom.columns:
+            dedup_cols.append("block_capacity_ah")
+        block_soh_vals = (
+            anom[mask]
+            .drop_duplicates(subset=dedup_cols)
+            ["cycle_soh"]
+            .round(3)
+            .tolist()
+        )
+
+    return _safe_json({
+        "cycle_soh":      csoh_vals,
+        "block_soh":      block_soh_vals,
+        "cycle_soh_n":    len(csoh_vals),
+        "block_soh_n":    len(block_soh_vals),
     })

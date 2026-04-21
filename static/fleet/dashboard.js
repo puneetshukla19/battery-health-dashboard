@@ -429,24 +429,24 @@ async function loadBayesCoef(reg) {
     return;
   }
 
-  renderCoefChart("coefGlobalChart", d.global, "Fleet Global (median)", true);
+  renderCoefChart("coefGlobalChart", d.global, "Fleet Global (median)", true, "#f59e0b");
 
   if (reg && Object.keys(d.vehicle).length > 0) {
     document.getElementById("coefVehicleHeader").textContent = reg;
-    renderCoefChart("coefVehicleChart", d.vehicle, reg, true);
+    renderCoefChart("coefVehicleChart", d.vehicle, reg, true, "#3b82f6");
   } else if (reg) {
     document.getElementById("coefVehicleChart").innerHTML =
       `<div class="placeholder-msg"><div class="ico">📭</div><p>No coefficient data for ${reg}</p></div>`;
   }
 }
 
-function renderCoefChart(divId, coefObj, title, negativeOnly = false) {
+function renderCoefChart(divId, coefObj, title, negativeOnly = false, color = "#3b82f6") {
   try {
     let entries = Object.entries(coefObj).sort((a, b) => a[1] - b[1]);
     if (negativeOnly) entries = entries.filter(([, v]) => v < 0);
-    const labels  = entries.map(([k]) => k.replace(/_/g, " "));
-    const values  = entries.map(([, v]) => v);
-    const colors  = values.map(() => "#3b82f6");
+    // Sort ascending (most negative → least negative) for vertical bars
+    const labels = entries.map(([k]) => k.replace(/_/g, " "));
+    const values = entries.map(([, v]) => v);
 
     if (typeof Plotly === "undefined") {
       document.getElementById(divId).innerHTML =
@@ -454,20 +454,19 @@ function renderCoefChart(divId, coefObj, title, negativeOnly = false) {
       return;
     }
 
-    const chartHeight = Math.max(260, entries.length * 26 + 80);
     document.getElementById(divId).innerHTML = "";
-    document.getElementById(divId).style.minHeight = chartHeight + "px";
+    document.getElementById(divId).style.minHeight = "280px";
     Plotly.newPlot(
       divId,
-      [{ type: "bar", orientation: "h", x: values, y: labels,
-         marker: { color: colors }, hovertemplate: "%{y}: %{x:.6f}<extra></extra>" }],
+      [{ type: "bar", x: labels, y: values,
+         marker: { color }, hovertemplate: "%{x}: %{y:.6f}<extra></extra>" }],
       {
         ...PLOTLY_LAYOUT_BASE,
-        height: chartHeight,
-        margin: { l: 175, r: 20, t: 32, b: 45 },
+        height: 280,
+        margin: { l: 50, r: 20, t: 32, b: 120 },
         title:  { text: title, font: { size: 12, color: "#334155" } },
-        xaxis:  { title: "Coefficient", gridcolor: "#e2e8f0", zerolinecolor: "#94a3b8" },
-        yaxis:  { automargin: true, tickfont: { size: 10 } },
+        xaxis:  { tickangle: -40, automargin: true, tickfont: { size: 9 }, gridcolor: "#e2e8f0" },
+        yaxis:  { title: "Coefficient", gridcolor: "#e2e8f0", zerolinecolor: "#94a3b8" },
       },
       PLOTLY_CFG
     );
@@ -480,7 +479,7 @@ function renderCoefChart(divId, coefObj, title, negativeOnly = false) {
 
 // ── Sessions — display columns (others are fetched for client-side filtering) ──
 const SESSION_HEADERS = [
-  "Vehicle","Start","End","Type","Start SoC","End SoC","EKF SoH","Duration (hrs)",
+  "Vehicle","Start","End","Type","Start SoC","End SoC","EKF SoH","Duration (hrs)","Session Odo (km)",
   "IF Score","IF Anomaly","CUSUM Anomaly","Degr. Score","Reason","Flagged",
   "V-Sags","IR Mean","Spread","Energy/km","Energy KWh","Low SOC",
   "Ref Cap AH","Voltage","Current","Cap AH Dischrg.","Cap AH Chrg.","Cap AH Plugin",
@@ -495,7 +494,7 @@ const SESSION_HEADERS = [
   "Cell Health","Cell Undervolt","Cell Overvolt","Rapid Heat","High E/km","Slow Chg","Fast Chg",
 ];
 const SESSION_FIELDS = [
-  "registration_number","start_time_ist","end_time_ist","session_type","soc_start","soc_end","ekf_soh","duration_hr",
+  "registration_number","start_time_ist","end_time_ist","session_type","soc_start","soc_end","ekf_soh","duration_hr","odometer_km",
   "if_score","if_anomaly","cusum_anomaly","composite_degradation_score","anomaly_reason","is_anomalous",
   "n_vsag","ir_ohm_mean","cell_spread_mean","energy_per_km","energy_kwh","n_low_soc",
   "ref_capacity_ah","voltage_mean_new","current_mean_new","capacity_ah_discharge_new","capacity_ah_charge_new","capacity_ah_plugin_new",
@@ -743,7 +742,8 @@ async function loadTelemetry(reg, sessionId, sessionType, startTime) {
   body.innerHTML = pairs.join("");
 
   // Render each chart
-  const syncIds = [];
+  const syncIds = [];  // line charts: trigger hover and receive crosshair
+  const barIds  = [];  // bar charts: receive crosshair only
   chartDefs.forEach(({ fields, yLabel, multi, bar, connectgaps }, i) => {
     const id = chartIds[i];
     const traces = fields
@@ -768,14 +768,16 @@ async function loadTelemetry(reg, sessionId, sessionType, startTime) {
     const layout = {
       ...TEL_LAYOUT,
       showlegend: !!(multi),
+      xaxis: { ...TEL_LAYOUT.xaxis, type: "date" },
       yaxis: { ...TEL_LAYOUT.yaxis, title: { text: yLabel, font: { size: 9 } } },
     };
     if (multi) layout.legend = { orientation: "h", x: 0.5, xanchor: "center", y: 1.12, font: { size: 9 } };
     Plotly.newPlot(id, traces, layout, PLOTLY_CFG);
-    if (!bar) syncIds.push(id);
+    if (bar) barIds.push(id);
+    else     syncIds.push(id);
   });
 
-  // Synchronized crosshair across line charts
+  // Synchronized crosshair across all charts (line charts trigger; bar charts receive)
   syncIds.forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -789,13 +791,13 @@ async function loadTelemetry(reg, sessionId, sessionType, startTime) {
         { type: "line", x0: xv, x1: xv, y0: 0, y1: 1, yref: "paper",
           line: { color: "#fbbf24", width: 2, dash: "dot" } },
       ];
-      syncIds.filter((i) => i !== id).forEach((oid) => {
+      [...syncIds.filter((i) => i !== id), ...barIds].forEach((oid) => {
         const oel = document.getElementById(oid);
         if (oel) Plotly.relayout(oel, { shapes: shape });
       });
     });
     el.on("plotly_unhover", () => {
-      syncIds.filter((i) => i !== id).forEach((oid) => {
+      [...syncIds.filter((i) => i !== id), ...barIds].forEach((oid) => {
         const oel = document.getElementById(oid);
         if (oel) Plotly.relayout(oel, { shapes: [] });
       });

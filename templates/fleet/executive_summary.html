@@ -35,7 +35,7 @@
       display: flex; align-items: center; justify-content: space-between;
       box-shadow: 0 2px 8px rgba(0,0,0,.25);
     }
-    .top-nav .brand { font-size: 1.1rem; font-weight: 700; color: #fff; letter-spacing: 0.02em; }
+    .top-nav .brand { font-size: 1.1rem; font-weight: 600; color: #fff; letter-spacing: .05em; text-transform: uppercase; }
     .top-nav .brand span { color: #60a5fa; }
     .top-nav .nav-link-back {
       font-size: 0.78rem; color: #94a3b8; text-decoration: none;
@@ -58,6 +58,13 @@
       content: ''; display: block;
       width: 4px; height: 18px; border-radius: 2px;
       background: linear-gradient(180deg, var(--blue), var(--indigo));
+    }
+    .section-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--blue), var(--indigo));
+      color: #fff; font-size: .68rem; font-weight: 700;
+      flex-shrink: 0; letter-spacing: 0; margin-right: 2px;
     }
 
     /* ── KPI Cards ── */
@@ -85,7 +92,7 @@
     .kpi-header { display: flex; align-items: center; justify-content: center; gap: 7px; margin-bottom: 0; }
     .kpi-icon { font-size: 1.4rem; color: #3b82f6; opacity: .85; flex-shrink: 0; }
     .kpi-label { font-size: 0.72rem; font-weight: 500; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; margin: 0; }
-    .kpi-value { font-size: 1.25rem; font-weight: 700; color: #0f172a; line-height: 1; text-align: center; }
+    .kpi-value { font-size: 1.00rem; font-weight: 700; color: #0f172a; line-height: 1; text-align: center; }
     .kpi-value.sm { font-size: 1.25rem; }
 
     /* ── Generic card ── */
@@ -123,17 +130,25 @@
     .summary-table tr:last-child td { border-bottom: none; }
     .summary-table tr[data-hover] { cursor: default; }
     .summary-table tr[data-hover]:hover { background: #eff6ff !important; }
+    #healthTable td { font-size: 0.75rem; }
+    #quintileTable tbody td { font-size: 0.75rem; }
     .summary-table tr[data-hover] td:first-child::after {
       content: ' ↗';
       font-size: 0.65rem; color: #93c5fd; margin-left: 4px;
     }
 
-    /* Tier + Quintile tables — light header */
-    #quintileTable thead th,
+    /* Tier + Breakdown tables — light header */
     #tier1Table thead th,
     #tier2Table thead th,
-    #tier3Table thead th {
-      position: static;
+    #tier3Table thead th { font-size: 0.69rem; background: #f1f5f9 !important; color: #475569 !important; }
+    #tier1Table tbody td,
+    #tier2Table tbody td,
+    #tier3Table tbody td { font-size: 0.69rem; }
+    #breakdownTable { font-size: 0.69rem; }
+    #breakdownTable thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
       background: #f8fafc;
       color: #475569;
       font-weight: 600;
@@ -141,7 +156,8 @@
       text-transform: uppercase;
       letter-spacing: .04em;
       border-bottom: 1px solid #e2e8f0;
-      padding: 9px 16px;
+      padding: 9px 12px;
+      white-space: nowrap;
     }
 
     /* ── Accordion (tiers) ── */
@@ -151,13 +167,19 @@
       box-shadow: var(--card-shadow); border: none !important;
     }
     .accordion-button { font-size: 0.85rem; font-weight: 700; letter-spacing: .04em; }
-    .tier1-btn { background: #fef2f2 !important; color: #b91c1c !important; }
-    .tier1-btn:not(.collapsed) { background: #fee2e2 !important; }
-    .tier2-btn { background: #fffbeb !important; color: #92400e !important; }
-    .tier2-btn:not(.collapsed) { background: #fef3c7 !important; }
-    .tier3-btn { background: #f0fdf4 !important; color: #166534 !important; }
-    .tier3-btn:not(.collapsed) { background: #dcfce7 !important; }
+    .tier1-btn { color: #475569 !important; font-size: 0.76rem !important; }
+    .tier2-btn { color: #475569 !important; font-size: 0.76rem !important; }
+    .tier3-btn { color: #475569 !important; font-size: 0.76rem !important; }
     .accordion-button::after { filter: none; }
+
+    /* ── Tier table row interactions ── */
+    .tier-vehicle-row:hover { background: #f1f5f9 !important; }
+    .tier-vehicle-row.tier-active { background: #dbeafe !important; outline: 2px solid #3b82f6; outline-offset: -2px; }
+    .tier-vehicle-row.tier-active .tier-reg-link { color: #1d4ed8 !important; }
+    .tier-reg-link:hover { opacity: .82; }
+
+    /* ── Anomalous session row interaction ── */
+    tr[data-sid]:hover { filter: brightness(0.96); }
 
     /* ── Tier note box ── */
     .tier-note {
@@ -165,9 +187,9 @@
       padding: 8px 12px; margin: 0 12px 8px;
       border-radius: 0 4px 4px 0;
     }
-    .tier-note-1 { color: #dc2626; }
-    .tier-note-2 { color: #d97706; }
-    .tier-note-3 { color: #059669; }
+    .tier-note-1 { color: #475569; }
+    .tier-note-2 { color: #475569; }
+    .tier-note-3 { color: #475569; }
 
     /* ── Business description box ── */
     .biz-desc-box {
@@ -188,6 +210,7 @@
       vertical-align: middle;
     }
     .tooltip { --bs-tooltip-font-size: .71rem; }
+    .tooltip-wide .tooltip-inner { max-width: none; white-space: nowrap; text-align: left; }
 
     /* ── Hover chart panel ── */
     #hoverPanel {
@@ -209,12 +232,13 @@
       background: rgba(15,23,42,0.65);
       z-index: 3000;
       display: none; align-items: flex-start; justify-content: center;
-      padding: 28px 16px; overflow-y: auto;
+      padding: 0 16px; overflow-y: auto;   /* no top padding — use panel margin instead */
     }
     #vdPanel {
       background: #fff; border-radius: 12px;
       box-shadow: 0 24px 64px rgba(0,0,0,.35);
       width: 100%; max-width: 960px; flex-shrink: 0;
+      margin: 28px 0 40px;   /* top margin keeps initial spacing; sticky ignores margin */
     }
     #vdHeader {
       display: flex; align-items: center; justify-content: space-between;
@@ -271,6 +295,125 @@
       border-radius: 0 6px 6px 0; padding: 10px 14px;
       font-size: .82rem; line-height: 1.65; color: #064e3b;
     }
+
+    /* ── Sticky modal header ── */
+    #vdHeader { position: sticky; top: 0; z-index: 100; }
+
+    /* ── FAQ accordion ── */
+    .faq-section { margin-top: 32px; margin-bottom: 40px; }
+    .faq-section .section-hdr { margin-bottom: 14px; }
+    .faq-item {
+      background: #fff; border-radius: var(--card-radius);
+      box-shadow: var(--card-shadow); border: none !important;
+      margin-bottom: 8px; overflow: hidden;
+    }
+    .faq-btn {
+      width: 100%; text-align: left; background: #f8fafc !important;
+      border: none; border-bottom: 1px solid #e2e8f0;
+      padding: 12px 16px; font-size: .84rem; font-weight: 600; color: #0f172a;
+      cursor: pointer; display: flex; align-items: center; justify-content: space-between;
+    }
+    .faq-btn:hover { background: #eff6ff !important; }
+    .faq-btn .faq-icon { transition: transform .2s; font-size: .8rem; color: #94a3b8; }
+    .faq-btn.open .faq-icon { transform: rotate(90deg); }
+    .faq-body {
+      display: none; padding: 14px 18px;
+      font-size: .82rem; line-height: 1.7; color: #334155;
+    }
+    .faq-body.open { display: block; }
+
+    /* ── Slider container ── */
+    #vehSliderContainer { min-height: 0; }
+
+    /* ════════════════════════════════════════
+       ANIMATION SYSTEM
+       ════════════════════════════════════════ */
+
+    /* Fade-up entrance — applied by IntersectionObserver */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(22px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeInScale {
+      from { opacity: 0; transform: scale(0.94); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+    @keyframes slideInLeft {
+      from { opacity: 0; transform: translateX(-18px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: var(--card-shadow); }
+      50%       { box-shadow: 0 0 0 3px rgba(59,130,246,0.18), var(--card-shadow); }
+    }
+    @keyframes shimmer {
+      0%   { background-position: -600px 0; }
+      100% { background-position: 600px 0; }
+    }
+    @keyframes countUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Section reveal: hidden before observer fires */
+    .reveal {
+      opacity: 0;
+      transform: translateY(22px);
+      transition: none;
+    }
+    .reveal.visible {
+      animation: fadeInUp 0.52s cubic-bezier(.22,.68,0,1.2) forwards;
+    }
+
+    /* Staggered children inside a reveal parent */
+    .reveal-stagger > * {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity .38s ease, transform .38s cubic-bezier(.22,.68,0,1.1);
+    }
+    .reveal-stagger.visible > *:nth-child(1) { opacity:1; transform:none; transition-delay:.05s; }
+    .reveal-stagger.visible > *:nth-child(2) { opacity:1; transform:none; transition-delay:.12s; }
+    .reveal-stagger.visible > *:nth-child(3) { opacity:1; transform:none; transition-delay:.19s; }
+    .reveal-stagger.visible > *:nth-child(4) { opacity:1; transform:none; transition-delay:.26s; }
+    .reveal-stagger.visible > *:nth-child(5) { opacity:1; transform:none; transition-delay:.33s; }
+    .reveal-stagger.visible > *:nth-child(6) { opacity:1; transform:none; transition-delay:.40s; }
+    .reveal-stagger.visible > *:nth-child(n+7) { opacity:1; transform:none; transition-delay:.47s; }
+
+    /* KPI cards — slightly more dramatic entrance */
+    .kpi-card.reveal-card {
+      opacity: 0;
+      transform: translateY(16px) scale(0.96);
+    }
+    .kpi-card.reveal-card.visible {
+      animation: fadeInScale 0.45s cubic-bezier(.22,.68,0,1.2) forwards;
+    }
+
+    /* Panel cards — lift on hover, already has transform but add glow to charts */
+    .panel { transition: box-shadow .2s; }
+    .panel:hover { box-shadow: 0 4px 20px rgba(59,130,246,0.10), var(--card-shadow); }
+
+    /* Tier rows — slide in when accordion opens */
+    .tier-vehicle-row {
+      animation: slideInLeft 0.3s ease both;
+    }
+
+    /* Accordion open animation */
+    .accordion-collapse.collapsing { transition: height 0.28s cubic-bezier(.4,0,.2,1) !important; }
+
+    /* VD modal entrance */
+    #vdPanel {
+      animation: fadeInScale 0.22s cubic-bezier(.22,.68,0,1.15) both;
+    }
+
+    /* Section header accent pulse on first view */
+    .section-hdr.hdr-pulse::before {
+      animation: pulseGlow 1.4s ease 0.3s 2;
+    }
+
+    /* Number counter animation */
+    .kpi-value.animating {
+      animation: countUp 0.4s ease both;
+    }
   </style>
 </head>
 <body>
@@ -285,14 +428,156 @@
 
 <!-- ── Navbar ──────────────────────────────────────────────────────────────── -->
 <nav class="top-nav">
-  <span class="brand">Battery Health for <span>Ultratech</span> Fleet — Executive Summary</span>
+  <div>
+    <span class="brand">Battery Health for <span>Ultratech</span> Fleet</span>
+    <div style="font-size:.68rem;color:#7dd3fc;margin-top:2px;font-weight:600;letter-spacing:.05em">
+      Real-time battery intelligence · <span id="navVehicleCount">—</span> vehicles · predictive maintenance analytics
+    </div>
+  </div>
 </nav>
+
+<!-- ── Business Objective strip ───────────────────────────────────────────── -->
+<div style="background:#1e3a5f;padding:18px 0 20px;border-bottom:1px solid #163354">
+  <div style="max-width:1400px;margin:0 auto;padding:0 28px">
+    <div style="font-size:.90rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#7dd3fc;margin-bottom:6px">Business Objective</div>
+    <div style="font-size:.84rem;color:#e2e8f0;font-weight:600;line-height:1.7">
+      Spot battery issues early, act before failures happen, and use data to reduce downtime, secure warranty claims, and lower operating costs.
+    </div>
+  </div>
+</div>
+
+<!-- ── Executive Summary Hero Callout ──────────────────────────────────── -->
+<div style="background:#1e3a5f;
+            padding:18px 0 20px;border-bottom:1px solid #163354;">
+  <div style="max-width:1400px;margin:0 auto;padding:0 28px">
+    <div style="font-size:.90rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#7dd3fc;margin-bottom:6px">
+      Executive Summary
+    </div>
+    <div style="font-size:.84rem;color:#e2e8f0;font-weight:600;line-height:1.7">
+      This dashboard uses <span data-bs-toggle="tooltip" data-bs-placement="right" data-bs-html="true" data-bs-custom-class="tooltip-wide"
+        data-bs-title="<b>1.</b> Extended Kalman Filter (EKF) — real-time SoH tracking<br><b>2.</b> Bayesian Ridge Regression — degradation trend modelling<br><b>3.</b> Isolation Forest — sudden anomaly detection<br><b>4.</b> CUSUM — gradual drift detection"
+        style="cursor:help;color:#93c5fd;text-decoration:underline dotted;text-underline-offset:3px;text-decoration-color:#93c5fd">four AI models<sup style="font-size:.65em;line-height:0;vertical-align:super">ⓘ</sup></span>
+      to continuously monitor battery health across Ultratech's <span id="heroVehicleCount">—</span>-vehicle EV fleet — predicting remaining life, enabling evidence-based replacements, prioritising maintenance, and detecting anomalies in real time to reduce downtime and protect warranty eligibility.
+    </div>
+    <div style="display:flex;gap:24px;margin-top:12px;flex-wrap:wrap">
+      <span style="font-size:.74rem;color:#94a3b8">
+        <span style="color:#22c55e;font-weight:700">●</span>&nbsp;
+        Automated daily pipeline
+      </span>
+      <span style="font-size:.74rem;color:#94a3b8">
+        <span style="color:#60a5fa;font-weight:700">●</span>&nbsp;
+        Per-vehicle replacement date range
+      </span>
+      <span style="font-size:.74rem;color:#94a3b8">
+        <span style="color:#f59e0b;font-weight:700">●</span>&nbsp;
+        Dual anomaly detection: transient fluctuations + gradual drift
+      </span>
+    </div>
+
+    <!-- Battery Intelligence Framework — collapsible -->
+    <div style="margin-top:14px">
+      <button onclick="this.nextElementSibling.classList.toggle('bif-open');this.querySelector('.bif-chevron').classList.toggle('bif-chevron-open');document.querySelectorAll('[data-bs-toggle=tooltip]').forEach(el=>{if(!bootstrap.Tooltip.getInstance(el))new bootstrap.Tooltip(el,{trigger:'hover'})})"
+        style="background:none;border:1px solid #334d6e;border-radius:6px;padding:5px 12px;cursor:pointer;
+               display:inline-flex;align-items:center;gap:8px;
+               font-size:.87rem;font-weight:600;color:#93c5fd;letter-spacing:.03em;text-transform:uppercase">
+        <span>Battery Intelligence Framework</span>
+        <span class="bif-chevron" style="font-size:.65rem;transition:transform .2s;display:inline-block">▶</span>
+      </button>
+      <div class="bif-body" style="display:none;margin-top:10px;
+           background:rgba(15,39,68,0.6);border:1px solid #2d5a8e;border-radius:8px;
+           padding:14px 18px;font-size:.80rem;color:#cbd5e1;line-height:1.7">
+
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
+
+          <!-- Step 1 -->
+          <div style="background:rgba(255,255,255,0.04);border-radius:6px;padding:10px 12px;border-left:3px solid #3b82f6">
+            <div style="font-size:.72rem;font-weight:700;color:#7dd3fc;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">1 · Accurate Capacity Estimation</div>
+            <div style="font-size:.78rem;color:#cbd5e1">Estimate the true usable battery capacity by continuously tracking energy flowing in and out of the battery (energy throughput), enabling a reliable measure of real-world performance.</div>
+          </div>
+
+          <!-- Step 2 -->
+          <div style="background:rgba(255,255,255,0.04);border-radius:6px;padding:10px 12px;border-left:3px solid #6366f1">
+            <div style="font-size:.72rem;font-weight:700;color:#a5b4fc;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">2 · Standardised SoH Assessment</div>
+            <div style="font-size:.78rem;color:#cbd5e1">Quantify State of Health by benchmarking measured capacity against the rated capacity of an equivalent vehicle/battery configuration — ensuring consistent, comparable health metrics across the fleet.</div>
+          </div>
+
+          <!-- Step 3 -->
+          <div style="background:rgba(255,255,255,0.04);border-radius:6px;padding:10px 12px;border-left:3px solid #8b5cf6">
+            <div style="font-size:.72rem;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">3 · Predictive SoH Modelling (EKF)</div>
+            <div style="font-size:.78rem;color:#cbd5e1">
+              Extended Kalman Filter dynamically refines SoH by integrating capacity fade, internal resistance evolution, cell-to-cell imbalance, and thermal stress — delivering noise-resilient estimates, early degradation detection, and forward-looking lifespan insights.
+            </div>
+          </div>
+
+          <!-- Step 4 -->
+          <div style="background:rgba(255,255,255,0.04);border-radius:6px;padding:10px 12px;border-left:3px solid #f59e0b">
+            <div style="font-size:.72rem;font-weight:700;color:#fcd34d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">4 · Anomaly Detection &amp; Risk Scoring</div>
+            <div style="font-size:.78rem;color:#cbd5e1">
+              <b style="color:#e2e8f0">(a)</b> Sudden deviations (voltage sag, rapid heating, fast-charge) detected by Isolation Forest;
+              gradual wear (SoH decline, efficiency fade, IR growth) tracked by CUSUM.<br>
+              <b style="color:#e2e8f0">(b)</b> Each vehicle receives an
+              <span data-bs-toggle="tooltip" data-bs-placement="top" data-bs-html="true"
+                data-bs-title="Based on abnormal event frequency &amp; severity — combines sudden-change detection and gradual wear signals."
+                style="cursor:help;color:#93c5fd;text-decoration:underline dotted;text-underline-offset:2px">Anomaly Score ⓘ</span>
+              and a
+              <span data-bs-toggle="tooltip" data-bs-placement="top" data-bs-html="true"
+                data-bs-title="<b>Transvolt Degradation Score</b> — a composite health index derived from capacity fade, resistance growth, thermal stress exposure, cell imbalance trends, calendar aging, and equivalent full cycles. Reflects the cumulative impact of aging and operating conditions on battery performance."
+                style="cursor:help;color:#93c5fd;text-decoration:underline dotted;text-underline-offset:2px">Degradation Score ⓘ</span>,
+              categorising it as 🔴 High Risk, 🟠 Moderate Risk, or 🟢 Low Risk.
+            </div>
+          </div>
+
+        </div><!-- /grid -->
+      </div><!-- /bif-body -->
+    </div><!-- /collapsible wrapper -->
+
+  </div>
+</div>
+
+<style>
+  .bif-body.bif-open { display:block !important; }
+  .bif-chevron-open { transform:rotate(90deg) !important; }
+</style>
 
 <div class="page-body">
 
+  <!-- ── How to Read This Dashboard ───────────────────────────────────────── -->
+  <div class="mt-3 reveal" id="readingGuide"
+       style="background:#fff;border-radius:10px;box-shadow:var(--card-shadow);
+              padding:14px 20px;border-left:4px solid var(--blue)">
+    <div style="font-size:.74rem;font-weight:700;color:#3b82f6;text-transform:uppercase;
+                letter-spacing:.06em;margin-bottom:8px">How to read this dashboard</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+      <div style="font-size:.78rem;color:#475569;line-height:1.6;display:flex;gap:8px;align-items:baseline">
+        <span class="section-num" style="flex-shrink:0;margin-top:2px">1</span>
+        <span><span style="font-weight:600;color:#0f172a">Fleet Health</span> — Top-level KPIs and overall battery condition</span>
+      </div>
+      <div style="font-size:.78rem;color:#475569;line-height:1.6;display:flex;gap:8px;align-items:baseline">
+        <span class="section-num" style="flex-shrink:0;margin-top:2px">2</span>
+        <span><span style="font-weight:600;color:#0f172a">Age Bands</span> — How health evolves as vehicles age</span>
+      </div>
+      <div style="font-size:.78rem;color:#475569;line-height:1.6;display:flex;gap:8px;align-items:baseline">
+        <span class="section-num" style="flex-shrink:0;margin-top:2px">3</span>
+        <span><span style="font-weight:600;color:#0f172a">BMS vs EKF</span> — Our model vs the on-board sensor</span>
+      </div>
+      <div style="font-size:.78rem;color:#475569;line-height:1.6;display:flex;gap:8px;align-items:baseline">
+        <span class="section-num" style="flex-shrink:0;margin-top:2px">4</span>
+        <span><span style="font-weight:600;color:#0f172a">Degradation Signals</span> — Factors driving battery wear</span>
+      </div>
+      <div style="font-size:.78rem;color:#475569;line-height:1.6;display:flex;gap:8px;align-items:baseline">
+        <span class="section-num" style="flex-shrink:0;margin-top:2px">5</span>
+        <span><span style="font-weight:600;color:#0f172a">Breakdown Timeline</span> — Projected battery replacement</span>
+      </div>
+      <div style="font-size:.78rem;color:#475569;line-height:1.6;display:flex;gap:8px;align-items:baseline">
+        <span class="section-num" style="flex-shrink:0;margin-top:2px">6</span>
+        <span><span style="font-weight:600;color:#0f172a">Anomaly Tiers</span> — Vehicles ranked by urgency of attention</span>
+      </div>
+    </div>
+  </div>
+
   <!-- ── KPI Cards ───────────────────────────────────────────────────────── -->
   <!-- Order: Analysis Period | Vehicles | Mean EKF SoH | SoH Std Dev | Median EKF RUL | Remaining EFC -->
-  <div class="kpi-grid mt-3">
+  <div class="kpi-grid mt-4 reveal-stagger">
 
     <div class="kpi-card kpi-accent" data-kpi-hover="kpi_period">
       <div class="kpi-header">
@@ -302,7 +587,7 @@
       <div class="kpi-value" id="kpiPeriod">—</div>
     </div>
 
-    <div class="kpi-card">
+    <div class="kpi-card" data-kpi-hover="kpi_vehicles" style="cursor:help">
       <div class="kpi-header">
         <i class="bi bi-bus-front kpi-icon"></i>
         <div class="kpi-label">Vehicles</div>
@@ -357,14 +642,17 @@
   </div>
 
   <!-- ── Fleet Health + Usage Age Bands (side by side) ──────────────────── -->
-  <div class="row g-3 mt-3 align-items-start">
+  <div class="row g-3 mt-3 align-items-start reveal">
 
     <div class="col-md-6">
-      <div class="section-hdr">Fleet Health</div>
+      <div class="section-hdr"><span class="section-num">1</span>Fleet Health</div>
       <div class="panel h-100">
-        <div class="panel-hdr">Overall Fleet Health — hover a row for detail</div>
+        <div class="panel-hdr" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Overall Fleet Health</span>
+          <span style="font-size:0.65rem;font-weight:400;color:#94a3b8;text-transform:none;letter-spacing:0">hover a row for detail</span>
+        </div>
         <div class="panel-body">
-          <table class="table summary-table">
+          <table class="table summary-table" id="healthTable">
             <tbody>
               <tr data-hover="data_span">
                 <td>Data Span</td>
@@ -393,7 +681,7 @@
                 <td>Median EKF RUL</td>
                 <td id="ht_ekfRul">—</td>
               </tr>
-              <tr>
+              <tr data-hover="ekf_rul_range">
                 <td>
                   EKF RUL Fleet Range (IQR)
                   <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="The middle 50% of vehicles fall within this projected lifespan range (25th to 75th percentile). Gives a sense of how spread the fleet's remaining life is.">ⓘ</span>
@@ -411,17 +699,11 @@
     </div>
 
     <div class="col-md-6">
-      <div class="section-hdr">Usage Age Bands (Q1–Q5)</div>
+      <div class="section-hdr"><span class="section-num">2</span>Usage Age Bands (Q1–Q8)</div>
       <div class="panel h-100">
-        <div class="panel-hdr">Median SoH by Usage Age — 5 Bands (Q1–Q5)</div>
+        <div class="panel-hdr">Median SoH by Usage Age</div>
         <div class="panel-body">
           <table class="table summary-table" id="quintileTable">
-            <thead>
-              <tr>
-                <th>Age Band (days in service)</th>
-                <th class="text-end">Median EKF SoH (%)</th>
-              </tr>
-            </thead>
             <tbody></tbody>
           </table>
         </div>
@@ -430,36 +712,172 @@
 
   </div>
 
-  <!-- ── BMS vs EKF SoH Scatter  +  Key Degradation Signals (same row) ── -->
-  <div class="row g-3 mt-3 align-items-start">
-    <div class="col-md-5">
-      <div class="section-hdr">BMS-Reported vs EKF State of Health</div>
-      <div class="panel h-100">
-        <div class="panel-hdr">Per-session BMS SoH (x) vs EKF SoH (y) — dashed = perfect agreement</div>
-        <div class="panel-body" style="padding:12px">
-          <div id="sohScatterPlot" style="height:320px"></div>
+  <!-- ── BMS vs EKF SoH Scatter  +  Delta Time Series (same row) ── -->
+  <div class="mt-5 reveal">
+    <div class="section-hdr"><span class="section-num">3</span>BMS-Reported vs EKF State of Health</div>
+    <!-- Vehicle slider -->
+    <div id="vehSliderContainer"></div>
+    <div style="font-size:.81rem;color:#475569;line-height:1.65;margin-bottom:14px;background:#faf5ff;border-left:3px solid #a855f7;padding:10px 16px;border-radius:0 6px 6px 0">
+      <strong style="color:#0f172a">Why EKF SoH diverges from BMS SoH:</strong>
+      The EKF independently infers battery health from raw telemetry — internal resistance, cell voltage spread,
+      thermal rise rate, and measured cycle SoH — without trusting the on-board BMS self-report.
+      When <strong>more vehicles are reporting simultaneously</strong> (high fleet sensor coverage),
+      the model has a richer data base and its estimates are most reliable.
+      Around <strong>January 2025</strong>, fleet-wide coverage peaked: the shaded region in the delta chart
+      marks this period. The positive delta (EKF &minus; BMS &gt; 0) indicates the EKF detected more degradation
+      than the BMS reported — a systematic under-reporting by the on-board sensor that the model corrects for.
+    </div>
+    <div class="row g-3 align-items-stretch">
+      <div class="col-md-4 d-flex flex-column">
+        <div class="panel h-100 d-flex flex-column">
+          <div class="panel-hdr">Per-session BMS SoH (x) vs EKF SoH (y) — axes: 100→95%</div>
+          <div class="panel-body d-flex flex-column flex-grow-1" style="padding:12px">
+            <div id="sohScatterPlot" style="height:250px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col d-flex flex-column">
+        <div class="panel h-100 d-flex flex-column">
+          <div class="panel-hdr">EKF SoH − BMS SoH delta over time — positive = EKF sees more degradation than BMS reports</div>
+          <div class="panel-body d-flex flex-column flex-grow-1" style="padding:12px">
+            <div id="sohDeltaPlot" style="height:250px"></div>
+          </div>
         </div>
       </div>
     </div>
-    <div class="col-md-7">
-      <div class="section-hdr">Key Degradation Signals</div>
-      <div class="panel h-100">
-        <div class="panel-hdr">Signals that most accelerate SoH decline — fleet-wide Bayesian ridge coefficients</div>
-        <div class="panel-body" style="padding:12px">
-          <div id="bayesCoefPlot" style="height:320px"></div>
+
+    <!-- ── EFC vs SoH  +  EFC over Time with EOL Projection (second row, section 3) ── -->
+    <div class="row g-3 mt-3 align-items-stretch">
+      <div class="col-md-6 d-flex flex-column">
+        <div class="panel h-100 d-flex flex-column">
+          <div class="panel-hdr">EFC vs State of Health — BMS reported &amp; EKF estimated SoH degradation over cumulative equivalent full cycles</div>
+          <div class="panel-body d-flex flex-column flex-grow-1" style="padding:12px">
+            <div id="efcSohPlot" style="height:250px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-6 d-flex flex-column">
+        <div class="panel h-100 d-flex flex-column">
+          <div class="panel-hdr">EFC consumption over time — with projected EFCs at 80% SoH EOL (EKF RUL × EFC rate)</div>
+          <div class="panel-body d-flex flex-column flex-grow-1" style="padding:12px">
+            <div id="efcTimePlot" style="height:250px"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Key Degradation Signals (moved below BMS vs EKF) ── -->
+  <div class="mt-5 reveal">
+    <div class="section-hdr"><span class="section-num">4</span>Key Degradation Signals</div>
+    <div class="row g-3">
+      <div class="col-md-7 d-flex flex-column">
+        <div class="panel flex-grow-1">
+          <div class="panel-hdr" style="display:flex;justify-content:space-between;align-items:center">
+            <span>Signals most linked to battery degradation</span>
+            <span style="font-size:.65rem;font-weight:400;color:#94a3b8;text-transform:none;letter-spacing:0">hover over each bar for a definition</span>
+          </div>
+          <div class="panel-body" style="padding:12px">
+            <div id="bayesCoefPlot" style="height:320px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-5 d-flex flex-column">
+        <div class="panel flex-grow-1">
+          <div class="panel-hdr">Coefficient CI — IQR spread across fleet</div>
+          <div class="panel-body" style="padding:12px">
+            <div id="bayesCoefCIPlot" style="height:320px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-12">
+        <div id="bayesCoefDesc" style="padding:10px 14px 4px;font-size:.78rem;color:#475569;line-height:1.7;border-top:1px solid #e2e8f0"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Section 5: Projected Breakdown Timeline ───────────────────────────── -->
+  <div class="mt-5 reveal" id="breakdownSection">
+    <div class="section-hdr"><span class="section-num">5</span>Projected Breakdown Timeline</div>
+    <div style="font-size:.82rem;color:#475569;margin-bottom:12px;line-height:1.65">
+      Vehicles ranked highest-to-lowest Remaining Useful Life. Bar height = EKF posterior RUL estimate;
+      error bars show the <strong>95% confidence interval</strong> propagated from EKF SoH uncertainty.
+      <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top"
+        data-bs-title="RUL = (EKF SoH − 80% EoL) ÷ |daily slope|. 95% CI: if EKF posterior bounds available they are used directly; otherwise σ_RUL = 2 × σ_SoH ÷ |slope| (Gaussian error propagation). Assumes current degradation rate is sustained.">ⓘ</span>
+    </div>
+    <div class="row g-3 align-items-start">
+      <div class="col-12">
+        <div class="panel">
+          <div class="panel-hdr" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px">
+            <span>Remaining Useful Life per Vehicle — sorted high → low — bars = EKF RUL · whiskers = 95% CI</span>
+            <span style="display:flex;gap:10px;font-size:.7rem;font-weight:600;text-transform:none;letter-spacing:0">
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#22c55e;margin-right:3px"></span>&gt; 3 yr</span>
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#f59e0b;margin-right:3px"></span>1–3 yr</span>
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#ef4444;margin-right:3px"></span>&lt; 1 yr</span>
+            </span>
+          </div>
+          <div class="panel-body" style="padding:12px">
+            <div id="breakdownTimelinePlot" style="height:400px"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 mt-2">
+        <div class="panel">
+          <div class="panel-hdr" style="display:flex;justify-content:space-between;align-items:center">
+            <span>Ranked Summary</span>
+            <span style="font-size:.65rem;font-weight:400;color:#94a3b8;text-transform:none;letter-spacing:0">click any row to open vehicle detail</span>
+          </div>
+          <div class="panel-body" style="padding:0">
+            <div style="max-height:340px;overflow-y:auto;overflow-x:hidden">
+              <table class="table table-sm table-bordered mb-0 summary-table" id="breakdownTable">
+                <thead>
+                  <tr>
+                    <th style="white-space:nowrap;cursor:pointer;user-select:none" onclick="_breakdownSort('reg')" title="Click to sort · click again to reverse · third click resets">Vehicle<span class="bd-sort-ind" data-col="reg"></span></th>
+                    <th class="text-end" style="white-space:nowrap;cursor:pointer;user-select:none" onclick="_breakdownSort('soh')" title="Click to sort">
+                      EKF SoH (%)<span class="bd-sort-ind" data-col="soh"></span>
+                      <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top"
+                        data-bs-title="Current EKF-estimated battery State of Health as % of original capacity. Below 80% = end of life.">ⓘ</span>
+                    </th>
+                    <th class="text-end" style="white-space:nowrap;cursor:pointer;user-select:none" onclick="_breakdownSort('rul')" title="Click to sort">
+                      EKF RUL (years)<span class="bd-sort-ind" data-col="rul"></span>
+                      <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top"
+                        data-bs-title="Remaining Useful Life in years — EKF model posterior estimate. Same value shown in the fleet bar chart.">ⓘ</span>
+                    </th>
+                    <th class="text-end" style="white-space:nowrap;cursor:pointer;user-select:none" onclick="_breakdownSort('ci_lo')" title="Click to sort">
+                      95% CI Lower<span class="bd-sort-ind" data-col="ci_lo"></span>
+                      <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top"
+                        data-bs-title="Lower bound of the 95% confidence interval on RUL. Pessimistic scenario — battery could fail this early.">ⓘ</span>
+                    </th>
+                    <th class="text-end" style="white-space:nowrap;cursor:pointer;user-select:none" onclick="_breakdownSort('ci_hi')" title="Click to sort">
+                      95% CI Upper<span class="bd-sort-ind" data-col="ci_hi"></span>
+                      <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top"
+                        data-bs-title="Upper bound of the 95% confidence interval on RUL. Optimistic scenario — battery could last this long.">ⓘ</span>
+                    </th>
+                    <th class="text-end" style="white-space:nowrap;cursor:pointer;user-select:none" onclick="_breakdownSort('eol')" title="Click to sort">
+                      Proj. EoL<span class="bd-sort-ind" data-col="eol"></span>
+                      <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top"
+                        data-bs-title="Estimated calendar date when battery SoH reaches 80%.">ⓘ</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody id="breakdownTableBody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
   <!-- ── Anomaly Tiers ──────────────────────────────────────────────────── -->
-  <div class="section-hdr mt-4">Anomaly Tiers</div>
+  <div class="section-hdr mt-5 reveal"><span class="section-num">6</span>Anomaly Tiers</div>
 
   <!-- Business description -->
-  <div class="biz-desc-box">
-    <strong>Why this matters:</strong> Each battery costs approximately ₹2 crore to replace.
-    By catching early degradation signals, targeted maintenance can extend battery life — even a 10% extension
-    across the fleet avoids significant replacement costs and prevents unplanned downtime.
+  <div style="border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:.82rem;color:#334155;line-height:1.65;border:1px solid #e2e8f0;background:#fff">
+    <strong>Why this matters:</strong> Early identification of battery degradation enables proactive interventions
+    that prevent on-route breakdowns, trigger timely warranty claims before they expire, and support AMC (Annual
+    Maintenance Contract) requests with hard evidence. Catching issues early also protects operational uptime —
+    a battery failure mid-route is far costlier than a scheduled maintenance stop.
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
       <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px">
         <div style="font-size:.72rem;font-weight:700;color:#0369a1;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Outlier Detection <span style="font-weight:400;text-transform:none;letter-spacing:0">(IF)</span></div>
@@ -480,7 +898,7 @@
     </div>
   </div>
 
-  <div class="accordion mb-4" id="tierAccordion">
+  <div class="accordion mb-4 reveal" id="tierAccordion">
 
     <div class="accordion-item">
       <h2 class="accordion-header">
@@ -499,11 +917,12 @@
             <table class="table table-sm table-bordered mb-0 summary-table" id="tier1Table">
               <thead>
                 <tr>
-                  <th>Vehicle <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Vehicle registration number">ⓘ</span></th>
+                  <th>Vehicle <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Vehicle registration number — click to open detail view">ⓘ</span></th>
                   <th>Reason <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Key reason this vehicle was placed in Tier 1 — based on health level, rate of decline, and flagged session count">ⓘ</span></th>
                   <th class="text-end">SoH (%) <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Current battery health as % of original capacity. Below 95% warrants attention.">ⓘ</span></th>
                   <th class="text-end">Slope (%/d) <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Rate of battery health decline per day. More negative = faster degradation.">ⓘ</span></th>
-                  <th class="text-end">Degr. Score <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Combined degradation risk score (0–1). Above 0.5 indicates significant risk.">ⓘ</span></th>
+                  <th class="text-end">Degr. Score <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Combined degradation risk score (0–100). Above 50 indicates significant risk. Combines SoH health deficit, IR trend, cell spread, voltage sag rate, temperature rise rate, and energy efficiency.">ⓘ</span></th>
+                  <th class="text-end">EKF RUL <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Remaining Useful Life = (current EKF SoH − 80% EOL) ÷ |daily slope|. Matches the RUL scatter chart in the vehicle detail modal. A fast-declining vehicle with SoH still at 97% can have higher RUL than a slow-declining one already at 91% — tier ranking reflects decay rate and anomaly signals, not RUL alone.">ⓘ</span></th>
                   <th class="text-end">Flagged Sessions <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Total number of sessions flagged as anomalous by the monitoring system">ⓘ</span></th>
                 </tr>
               </thead>
@@ -531,11 +950,12 @@
             <table class="table table-sm table-bordered mb-0 summary-table" id="tier2Table">
               <thead>
                 <tr>
-                  <th>Vehicle <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Vehicle registration number">ⓘ</span></th>
-                  <th>Note <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Summary of why this vehicle is in Tier 2">ⓘ</span></th>
+                  <th>Vehicle <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Vehicle registration number — click to open detail view">ⓘ</span></th>
+                  <th>Reason <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Summary of why this vehicle is in Tier 2">ⓘ</span></th>
                   <th class="text-end">SoH (%) <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Current battery health as % of original capacity.">ⓘ</span></th>
                   <th class="text-end">Slope (%/d) <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Rate of battery health decline per day. More negative = faster degradation.">ⓘ</span></th>
-                  <th class="text-end">Degr. Score <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Combined degradation risk score (0–1). Above 0.4 warrants monitoring.">ⓘ</span></th>
+                  <th class="text-end">Degr. Score <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Combined degradation risk score (0–100). Above 40 warrants monitoring.">ⓘ</span></th>
+                  <th class="text-end">EKF RUL <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Remaining Useful Life estimated by the EKF model.">ⓘ</span></th>
                   <th class="text-end">Flagged Sessions <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Total number of sessions flagged as anomalous by the monitoring system">ⓘ</span></th>
                 </tr>
               </thead>
@@ -563,11 +983,12 @@
             <table class="table table-sm table-bordered mb-0 summary-table" id="tier3Table">
               <thead>
                 <tr>
-                  <th>Vehicle <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Vehicle registration number">ⓘ</span></th>
-                  <th>Note <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Summary of why this vehicle is in Tier 3">ⓘ</span></th>
+                  <th>Vehicle <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Vehicle registration number — click to open detail view">ⓘ</span></th>
+                  <th>Reason <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Summary of why this vehicle is in Tier 3">ⓘ</span></th>
                   <th class="text-end">SoH (%) <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Current battery health as % of original capacity.">ⓘ</span></th>
                   <th class="text-end">Slope (%/d) <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Rate of battery health decline per day. Near-zero = stable.">ⓘ</span></th>
-                  <th class="text-end">Degr. Score <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Combined degradation risk score (0–1). Below 0.45 indicates manageable risk.">ⓘ</span></th>
+                  <th class="text-end">Degr. Score <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Combined degradation risk score (0–100). Below 45 indicates manageable risk.">ⓘ</span></th>
+                  <th class="text-end">EKF RUL <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Remaining Useful Life estimated by the EKF model.">ⓘ</span></th>
                   <th class="text-end">Flagged Sessions <span class="col-info" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="Total number of sessions flagged as anomalous by the monitoring system">ⓘ</span></th>
                 </tr>
               </thead>
@@ -579,6 +1000,110 @@
     </div>
 
   </div>
+
+  <!-- ── FAQ Section ──────────────────────────────────────────────────────── -->
+  <div class="faq-section reveal">
+    <div class="section-hdr" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center"
+         onclick="toggleFaqSection(this)">
+      <span style="display:flex;align-items:center;gap:10px">
+        <span class="section-num" style="border-radius:4px;width:auto;padding:0 6px">FAQ</span>
+        Frequently Asked Questions
+      </span>
+      <span class="faq-section-chevron" style="font-size:.7rem;color:#94a3b8;transition:transform .22s;display:inline-block">▶</span>
+    </div>
+    <div class="faq-section-body" style="display:none">
+
+    <div class="faq-item">
+      <button class="faq-btn" onclick="toggleFaq(this)">
+        What is SoH and how is it measured? (Cycle SoH, Block SoH, Coulomb Counting)
+        <span class="faq-icon">▶</span>
+      </button>
+      <div class="faq-body">
+        <p><strong>State of Health (SoH)</strong> measures how much of the battery's original capacity remains.
+        100% = brand new; 80% = end of usable life for commercial EV operation.</p>
+        <p><strong>Coulomb counting</strong> is the foundational method: integrate the current in/out of the battery
+        over time to measure how many Amp-hours (Ah) were actually stored or delivered, then compare against
+        the original rated capacity (436 Ah for this fleet). A session that delivers 420 Ah
+        when the battery started full → SoH ≈ 420/436 ≈ 96.3%.</p>
+        <p><strong>Cycle SoH</strong> (shown as "Cycle SOH" column): The SoH estimated from one complete discharge
+        or charge cycle. For discharge: (Ah discharged) / (nominal capacity × SoC change). Requires a session
+        where the battery goes through enough SoC range to measure reliably. Quality-gated — sessions with
+        very small SoC swings are excluded.</p>
+        <p><strong>Block SoH</strong>: Uses the full drive-to-charge block (multiple sessions) rather than a
+        single trip. The "Block Cap AH" column shows the total Ah across the block; dividing by the SoC drop
+        gives an effective pack capacity, which is then divided by the nominal 436 Ah to get SoH. This is
+        more robust than single-session estimates because it averages out trip-to-trip variation.</p>
+        <p><strong>EKF SoH</strong>: The most reliable estimate — uses an Extended Kalman Filter that combines
+        Cycle SoH, BMS-reported SoH, internal resistance, cell spread, and temperature signals to maintain a
+        continuously updated, noise-filtered health estimate for each vehicle.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-btn" onclick="toggleFaq(this)">
+        What is Weak Subsystem Consistency and why does it matter?
+        <span class="faq-icon">▶</span>
+      </button>
+      <div class="faq-body">
+        <p><strong>Weak subsystem</strong> refers to the battery subsystem (group of cells) with the lowest
+        average voltage — the "weakest link" that limits overall pack performance.</p>
+        <p><strong>Consistency score (0–1)</strong> measures how often the <em>same</em> subsystem is the
+        weakest across sessions. A score near <strong>1.0</strong> means the same group is consistently
+        the weakest — a localised, identifiable problem worth targeted inspection. A score near
+        <strong>0</strong> means the weakest subsystem changes frequently — either measurement noise,
+        very even cell ageing (no clear weak spot), or transient thermal effects.</p>
+        <p><strong>How to interpret:</strong> Low consistency + high cell spread = measurement-level
+        noise or distributed ageing. Low consistency + low spread = generally balanced pack.
+        High consistency + low spread = one persistently weak group that should be inspected at the
+        next service. High consistency + high spread = clear candidate for cell replacement.</p>
+        <p><strong>Why subsystem voltage std is high:</strong> Each subsystem averages the voltages of
+        its constituent cells. If one group has cells at the end of their plateau and another is still
+        in the middle, the difference can be 5–20 mV even in a "healthy" pack. Under load (discharge),
+        these differences amplify because weaker cells sag more. So a high std during discharge is
+        normal; a persistently high std at rest or during charging is the flag to watch.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-btn" onclick="toggleFaq(this)">
+        How is Thermal Stress calculated?
+        <span class="faq-icon">▶</span>
+      </button>
+      <div class="faq-body">
+        <p><strong>Thermal stress</strong> is a composite index that captures both the <em>intensity</em> and
+        <em>duration</em> of high-temperature exposure during a session. It is computed as:</p>
+        <pre style="background:#f8fafc;padding:10px 14px;border-radius:6px;font-size:.78rem;border:1px solid #e2e8f0">
+thermal_stress = (temp_max − temp_threshold) × duration_above_threshold_hr</pre>
+        <p>where <code>temp_threshold</code> is the fleet-calibrated safe operating temperature (typically 40–45°C).
+        Sessions where the pack stays cool have near-zero thermal stress. Sessions with sustained high
+        temperatures (e.g. heavy-load runs in summer) accumulate high stress scores.</p>
+        <p><strong>Why it matters:</strong> Lithium-ion chemistry degrades faster at elevated temperatures —
+        both calendar ageing and cycle ageing accelerate above 35°C. Sustained thermal stress is one of the
+        strongest predictors of accelerated SoH decline in this fleet's Bayesian Ridge model.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-btn" onclick="toggleFaq(this)">
+        What does the Anomaly Detection system flag? (IF vs CUSUM)
+        <span class="faq-icon">▶</span>
+      </button>
+      <div class="faq-body">
+        <p><strong>Isolation Forest (IF)</strong> — session-level outlier detection. It looks at the
+        combination of 30+ signals in a single session and asks: "Is this session statistically unusual
+        compared to all sessions in the fleet?" Flags isolated bad events.</p>
+        <p><strong>CUSUM (Cumulative Sum)</strong> — drift detection. It tracks individual signals
+        (IR, cell spread, temperature, SoH, voltage sags, efficiency) across consecutive sessions and
+        raises an alarm when there is a sustained upward or downward shift — even if no single session
+        is an outlier. Catches slow, persistent degradation trends.</p>
+        <p>The combination means the system catches both sudden shocks (charger faults, unusual trips)
+        and gradual decline that would be invisible in a snapshot view.</p>
+      </div>
+    </div>
+
+    </div><!-- /faq-section-body -->
+  </div>
+
 
 </div><!-- /page-body -->
 
@@ -603,6 +1128,22 @@
 </div>
 
 {% load static %}
-<script src="{% static 'fleet/executive_summary.js' %}?v=44"></script>
+<script src="{% static 'fleet/executive_summary.js' %}?v=119"></script>
+<script>
+function toggleFaq(btn) {
+  const body = btn.nextElementSibling;
+  const isOpen = body.classList.contains("open");
+  btn.classList.toggle("open", !isOpen);
+  body.classList.toggle("open", !isOpen);
+}
+
+function toggleFaqSection(hdrEl) {
+  const body    = hdrEl.nextElementSibling;
+  const chevron = hdrEl.querySelector(".faq-section-chevron");
+  const isOpen  = body.style.display !== "none";
+  body.style.display = isOpen ? "none" : "block";
+  if (chevron) chevron.style.transform = isOpen ? "" : "rotate(90deg)";
+}
+</script>
 </body>
 </html>

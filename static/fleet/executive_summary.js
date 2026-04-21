@@ -30,14 +30,19 @@ function rulToYears(days) {
 /* ─── init ───────────────────────────────────────────────────────────────────── */
 async function init() {
   try {
-    const [ov, veh, trend, quint, tiers, scatter, coef] = await Promise.all([
-      fetch("/api/overview/").then(r => r.json()),
-      fetch("/api/vehicles/").then(r => r.json()),
-      fetch("/api/fleet-trend/").then(r => r.json()),
-      fetch("/api/quintiles/").then(r => r.json()),
-      fetch("/api/anomaly-tiers/").then(r => r.json()),
-      fetch("/api/soh-scatter/").then(r => r.json()),
-      fetch("/api/bayes-coef/").then(r => r.json()),
+    const _j = r => r.ok ? r.json() : Promise.reject(r.status);
+    const [ov, veh, trend, quint, tiers, scatter, coef, delta, bdTimeline, dists, efcTrend] = await Promise.all([
+      fetch("/api/overview/").then(_j),
+      fetch("/api/vehicles/").then(_j),
+      fetch("/api/fleet-trend/").then(_j),
+      fetch("/api/quintiles/").then(_j),
+      fetch("/api/anomaly-tiers/").then(_j),
+      fetch("/api/soh-scatter/").then(_j),
+      fetch("/api/bayes-coef/").then(_j),
+      fetch("/api/soh-delta-trend/").then(_j),
+      fetch("/api/breakdown-timeline/").then(_j).catch(() => null),
+      fetch("/api/distributions/").then(_j).catch(() => null),
+      fetch("/api/efc-trend/").then(_j).catch(() => null),
     ]);
 
     _overview  = ov;
@@ -45,18 +50,29 @@ async function init() {
     _trend     = trend.trend;
     _quintiles = quint.quintiles;
     _tiers     = tiers;
+    _deltaData = delta;
+    _efcData   = efcTrend;
 
     renderKPICards();
     renderFleetHealth();
     renderSohScatter(scatter);
+    renderSohDeltaChart();
+    buildVehicleSlider();
     renderQuintiles();
     renderBayesCoef(coef);
+    if (bdTimeline && bdTimeline.ref_date) data_refDate = bdTimeline.ref_date;
+    renderBreakdownTimeline(bdTimeline);
+    renderDistributions(dists);
     renderAnomalyTiers();
     setupHoverCharts();
     // Initialise Bootstrap tooltips (Popper.js-based — not clipped by overflow containers)
     document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el =>
       new bootstrap.Tooltip(el, { trigger: "hover", placement: "top" })
     );
+
+    // ── Scroll-reveal animations (IntersectionObserver) ──────────────────
+    initScrollReveal();
+
   } catch (e) {
     console.error("executive_summary init failed:", e);
   } finally {
@@ -69,8 +85,13 @@ function renderKPICards() {
   const o = _overview;
   document.getElementById("kpiPeriod").textContent       = fmtPeriod(o.first_date, o.last_date);
   document.getElementById("kpiVehicles").textContent     = o.n_vehicles;
+  // Update hero callout + navbar vehicle count dynamically
+  const heroVeh = document.getElementById("heroVehicleCount");
+  if (heroVeh && o.n_vehicles != null) heroVeh.textContent = o.n_vehicles;
+  const navVeh = document.getElementById("navVehicleCount");
+  if (navVeh && o.n_vehicles != null) navVeh.textContent = o.n_vehicles;
   document.getElementById("kpiMeanSoh").textContent      = fmtPct(o.fleet_mean_soh);
-  document.getElementById("kpiStdSoh").textContent       = fmtPct(o.fleet_std_soh);
+  document.getElementById("kpiStdSoh").textContent       = fmt(o.fleet_std_soh, 1) + "%";
   document.getElementById("kpiEkfRul").textContent       = rulToYears(o.median_ekf_rul);
   document.getElementById("kpiRemainingEfc").textContent = o.fleet_median_remaining_efc != null
     ? Math.round(o.fleet_median_remaining_efc).toLocaleString() + " EFC" : "—";
@@ -81,9 +102,9 @@ function renderFleetHealth() {
   const o = _overview;
   document.getElementById("ht_span").textContent       = `${o.span_days} days`;
   document.getElementById("ht_meanSoh").textContent    = fmtPct(o.fleet_mean_soh);
-  document.getElementById("ht_stdSoh").textContent     = fmtPct(o.fleet_std_soh);
+  document.getElementById("ht_stdSoh").textContent     = fmt(o.fleet_std_soh, 1) + "%";
   const sign = o.soh_trend_pct >= 0 ? "+" : "";
-  document.getElementById("ht_trend").textContent      = `${sign}${fmt(o.soh_trend_pct, 2)}%`;
+  document.getElementById("ht_trend").textContent      = `${sign}${fmt(o.soh_trend_pct, 1)}%`;
   const total = o.total_sessions;
   document.getElementById("ht_population").textContent = total != null
     ? `${total.toLocaleString()} sessions` : "—";
@@ -109,48 +130,628 @@ function renderQuintiles() {
 }
 
 /* ─── BMS SoH vs EKF SoH scatter ────────────────────────────────────────────── */
+let _scatterData = null;   // raw points cache for slider re-renders
+let _deltaData   = null;   // delta trend cache for slider re-renders
+let _efcData     = null;   // efc-trend cache for EFC charts
+let _scatterVeh  = null;   // currently selected vehicle (null = fleet view)
+
 function renderSohScatter(data) {
+  _scatterData = data;
+  _drawScatter();
+}
+
+function _ptDate(p) {
+  // Resolve a YYYY-MM-DD string from either `date` or `start_time_ist`
+  if (p.date && p.date !== "NaN" && p.date !== "null") return p.date;
+  if (p.start_time_ist) return String(p.start_time_ist).slice(0, 10);
+  return null;
+}
+
+function _drawScatter() {
   const el = document.getElementById("sohScatterPlot");
-  if (!el || !data || !data.points || !data.points.length) return;
+  if (!el || !_scatterData || !_scatterData.points || !_scatterData.points.length) return;
+  let pts = _scatterData.points;
+  if (_sec3DateFrom || _sec3DateTo) {
+    pts = pts.filter(p => {
+      const d = _ptDate(p);
+      if (!d) return true;
+      if (_sec3DateFrom && d < _sec3DateFrom) return false;
+      if (_sec3DateTo   && d > _sec3DateTo)   return false;
+      return true;
+    });
+  }
 
-  const pts = data.points;
-  const allX = pts.map(p => p.soh).filter(v => v != null);
-  const allY = pts.map(p => p.ekf_soh).filter(v => v != null);
-  const lo = Math.min(...allX, ...allY);
-  const hi = Math.max(...allX, ...allY);
+  const allX = pts.map(p => p.soh);
+  const allY = pts.map(p => p.ekf_soh);
 
-  Plotly.newPlot(el, [
-    // Fleet-wide single trace
-    { type: "scatter", mode: "markers",
-      x: pts.map(p => p.soh),
-      y: pts.map(p => p.ekf_soh),
-      marker: { color: "#3b82f6", size: 3.5, opacity: 0.45 },
-      hovertemplate: "BMS SoH: %{x:.2f}%<br>EKF SoH: %{y:.2f}%<extra></extra>",
-      showlegend: false },
-    // y = x reference line
-    { type: "scatter", mode: "lines",
-      x: [lo, hi], y: [lo, hi],
-      line: { color: "#94a3b8", width: 1.5, dash: "dash" },
-      name: "y = x", hoverinfo: "skip" },
-  ], {
+  // Density shadow: smooth contour layer rendered under the markers
+  const densityTrace = {
+    type: "histogram2dcontour",
+    x: allX, y: allY,
+    colorscale: [[0,"rgba(0,0,0,0)"], [0.15,"rgba(216,180,254,0.18)"],
+                 [0.45,"rgba(168,85,247,0.38)"],  [0.75,"rgba(168,85,247,0.55)"],
+                 [1,  "rgba(109,40,217,0.72)"]],
+    showscale: false,
+    ncontours: 10,
+    contours: { coloring: "fill", showlines: false },
+    hoverinfo: "skip",
+    name: "density",
+    xbins: { size: 0.12 },
+    ybins: { size: 0.12 },
+  };
+
+  let traces;
+  if (_scatterVeh) {
+    // Selected vehicle: blue; others: grey — no density shadow in vehicle view
+    const selPts   = pts.filter(p => p.registration_number === _scatterVeh);
+    const otherPts = pts.filter(p => p.registration_number !== _scatterVeh);
+    traces = [
+      { type: "scatter", mode: "markers",
+        x: otherPts.map(p => p.soh), y: otherPts.map(p => p.ekf_soh),
+        marker: { color: "#cbd5e1", size: 3, opacity: 0.35 },
+        name: "Other vehicles", hoverinfo: "skip", showlegend: true },
+      { type: "scatter", mode: "markers",
+        x: selPts.map(p => p.soh), y: selPts.map(p => p.ekf_soh),
+        marker: { color: "#a855f7", size: 5, opacity: 0.9 },
+        name: _scatterVeh,
+        hovertemplate: _scatterVeh + "<br>BMS: %{x:.2f}%<br>EKF: %{y:.2f}%<extra></extra>",
+        showlegend: true },
+    ];
+  } else {
+    traces = [
+      densityTrace,
+      { type: "scatter", mode: "markers",
+        x: allX, y: allY,
+        marker: { color: "#a855f7", size: 3, opacity: 0.25 },
+        hovertemplate: "%{customdata}<br>BMS SoH: %{x:.2f}%<br>EKF SoH: %{y:.2f}%<extra></extra>",
+        customdata: pts.map(p => p.registration_number || ""),
+        name: "Fleet", showlegend: false },
+    ];
+  }
+  // Compute OLS slope (y on x) from the same (date-filtered) fleet points
+  const allPts  = pts;
+  let slopeAnnotation = null;
+  if (allPts.length > 1) {
+    const xs = allPts.map(p => p.soh).filter(v => v != null);
+    const ys = allPts.map((p, i) => p.soh != null ? p.ekf_soh : null).filter(v => v != null);
+    const n  = Math.min(xs.length, ys.length);
+    if (n > 1) {
+      const xArr = xs.slice(0, n), yArr = ys.slice(0, n);
+      const xMu  = xArr.reduce((s, v) => s + v, 0) / n;
+      const yMu  = yArr.reduce((s, v) => s + v, 0) / n;
+      const cov  = xArr.reduce((s, v, i) => s + (v - xMu) * (yArr[i] - yMu), 0);
+      const varX = xArr.reduce((s, v) => s + (v - xMu) ** 2, 0);
+      const slope = varX > 0 ? cov / varX : null;
+      if (slope !== null) {
+        slopeAnnotation = {
+          x: 0.98, y: 0.04, xref: "paper", yref: "paper",
+          text: `OLS slope: <b>${slope.toFixed(3)}</b>  (EKF = ${slope.toFixed(3)} × BMS + c)`,
+          showarrow: false, align: "right",
+          font: { size: 9, color: "#475569", family: "Plus Jakarta Sans" },
+          bgcolor: "rgba(255,255,255,.88)", borderpad: 4,
+          bordercolor: "#e2e8f0", borderwidth: 1,
+        };
+      }
+    }
+  }
+
+  // y = x reference line in zoomed range
+  traces.push({ type: "scatter", mode: "lines",
+    x: [95, 100], y: [95, 100],
+    line: { color: "#94a3b8", width: 1.5, dash: "dash" },
+    name: "y = x", hoverinfo: "skip" });
+
+  const countAnnotation = {
+    x: 0.02, y: 0.04, xref: "paper", yref: "paper",
+    text: `${pts.length} sessions`,
+    showarrow: false, align: "left",
+    font: { size: 8.5, color: "#94a3b8", family: "Plus Jakarta Sans" },
+    bgcolor: "rgba(255,255,255,.7)", borderpad: 3,
+  };
+
+  Plotly.purge(el);
+  Plotly.newPlot(el, traces, {
     paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
     font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
     margin: { l: 52, r: 12, t: 12, b: 52 },
     xaxis: { title: { text: "BMS-Reported SoH (%)", font: { size: 9.5 } },
-             gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+             range: [100, 95], gridcolor: "#e2e8f0", tickfont: { size: 9 } },
     yaxis: { title: { text: "EKF SoH (%)", font: { size: 9.5 } },
-             gridcolor: "#e2e8f0", tickfont: { size: 9 } },
-    showlegend: true,
+             range: [100, 95], gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    annotations: [countAnnotation, ...(slopeAnnotation ? [slopeAnnotation] : [])],
+    showlegend: _scatterVeh != null,
     legend: { x: 0.02, y: 0.98, font: { size: 8.5 } },
   }, { displayModeBar: false, responsive: true });
 }
 
+/* ─── SoH Delta time-series chart (EKF − BMS) ───────────────────────────────── */
+function renderSohDeltaChart() {
+  _drawDeltaChart();
+}
+
+function _drawDeltaChart() {
+  const el = document.getElementById("sohDeltaPlot");
+  if (!el || !_deltaData) return;
+
+  let traces;
+
+  if (_scatterVeh) {
+    // Show full vehicle history — no date-slider filter
+    let pts = (_deltaData.vehicle_points || [])
+      .filter(p => p.registration_number === _scatterVeh);
+    pts.sort((a, b) => a.date < b.date ? -1 : 1);
+    traces = [{
+      type: "scatter", mode: "lines+markers",
+      x: pts.map(p => p.date), y: pts.map(p => p.delta),
+      line: { color: "#a855f7", width: 2 },
+      marker: { size: 4, color: "#a855f7" },
+      name: _scatterVeh,
+      hovertemplate: "%{x}<br>EKF − BMS delta: %{y:.2f}%<extra></extra>",
+    }];
+  } else {
+    // Fleet-wide daily median delta — always full range, no date-slider filter
+    let ft = [...(_deltaData.fleet_trend || [])];
+    ft.sort((a, b) => a.date < b.date ? -1 : 1);
+    traces = [{
+      type: "scatter", mode: "lines",
+      x: ft.map(p => p.date), y: ft.map(p => p.fleet_median_delta),
+      line: { color: "#a855f7", width: 2 },
+      fill: "tozeroy", fillcolor: "rgba(168,85,247,0.08)",
+      name: "Fleet median δ",
+      hovertemplate: "%{x}<br>Fleet median EKF−BMS: %{y:.2f}%<extra></extra>",
+    }];
+  }
+  // Zero reference
+  traces.push({ type: "scatter", mode: "lines",
+    x: (traces[0].x || []).slice(0, 1).concat((traces[0].x || []).slice(-1)),
+    y: [0, 0],
+    line: { color: "#94a3b8", width: 1, dash: "dash" },
+    name: "Zero line", hoverinfo: "skip", showlegend: false });
+
+  // Shade from Jan 2026 to end of data (high BMS coverage period)
+  const allDates = (traces[0].x || []);
+  const shadeEnd = allDates.length ? allDates[allDates.length - 1] : "2026-06-30";
+
+  Plotly.react(el, traces, {
+    paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+    margin: { l: 52, r: 12, t: 30, b: 52 },
+    xaxis: { title: { text: "Date", font: { size: 9.5 } }, gridcolor: "#e2e8f0", tickangle: -30, tickfont: { size: 8.5 } },
+    yaxis: { title: { text: "EKF SoH − BMS SoH (%)", font: { size: 9.5 } }, gridcolor: "#e2e8f0", tickfont: { size: 9 }, fixedrange: true },
+    showlegend: true,
+    legend: { x: 0.5, y: 1.0, xanchor: "center", yanchor: "bottom", orientation: "h", font: { size: 8.5 } },
+    shapes: [{
+      type: "rect", xref: "x", yref: "paper",
+      x0: "2026-01-25", x1: shadeEnd, y0: 0, y1: 1,
+      fillcolor: "rgba(34,197,94,0.12)", line: { width: 0 },
+    }],
+    annotations: [{
+      xref: "x", yref: "paper",
+      x: "2026-02-05", y: 0.96,
+      text: "High BMS coverage (Jan 25 '26 →)", showarrow: false,
+      font: { size: 8, color: "#16a34a", family: "Plus Jakarta Sans" },
+      bgcolor: "rgba(255,255,255,0.85)", borderpad: 3,
+    }],
+  }, { displayModeBar: false, responsive: true });
+}
+
+/* ─── Vehicle slider + date slider for scatter + delta charts ───────────────────── */
+let _sec3DateFrom = null;
+let _sec3DateTo   = null;
+let _sec3DateList = [];
+
+function buildVehicleSlider() {
+  const container = document.getElementById("vehSliderContainer");
+  if (!container || !_deltaData) return;
+
+  // Sorted unique vehicle list
+  const allVeh = [...new Set((_deltaData.vehicle_points || []).map(p => p.registration_number))].sort();
+  if (!allVeh.length) { container.style.display = "none"; return; }
+
+  // Sorted unique date list from fleet trend + vehicle points
+  _sec3DateList = [...new Set([
+    ...(_deltaData.fleet_trend       || []).map(p => p.date),
+    ...(_deltaData.vehicle_points    || []).map(p => p.date),
+  ].filter(Boolean))].sort();
+  const nd = _sec3DateList.length;
+  _sec3DateFrom = nd ? _sec3DateList[0]      : null;
+  _sec3DateTo   = nd ? _sec3DateList[nd - 1] : null;
+
+  const labelStyle = "font-size:.74rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap";
+
+  // Grid columns: [label] [veh-slider 180px] [veh-name auto] [checkbox+label auto] [right-info 1fr]
+  // Date slider spans cols 2-4 (same pixel span as slider+name+checkbox), Reset sits in col 5.
+  container.innerHTML = `
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;margin-bottom:10px">
+      <div style="display:grid;grid-template-columns:auto 180px auto auto 1fr;align-items:center;row-gap:${nd > 1 ? "18px" : "0"};column-gap:8px">
+
+        <!-- Row 1: vehicle filter -->
+        <label style="${labelStyle}">Vehicle</label>
+        <input type="range" id="vehSlider" min="0" max="${allVeh.length - 1}" value="0" step="1"
+          style="width:100%;accent-color:#a855f7" ${_scatterVeh ? "" : "disabled"}>
+        <span id="vehSliderLabel" style="font-size:.75rem;font-weight:600;color:#a855f7;min-width:120px;padding:0 4px;white-space:nowrap">—</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="vehSliderToggle" style="accent-color:#94a3b8;width:14px;height:14px;flex-shrink:0">
+          <label for="vehSliderToggle" style="font-size:.74rem;color:#64748b;cursor:pointer;white-space:nowrap">Enable vehicle filter</label>
+        </div>
+        <div style="font-size:.72rem;color:#94a3b8;white-space:nowrap;text-align:right;padding-left:8px">${allVeh.length} vehicles · sorted alphabetically</div>
+
+        ${nd > 1 ? `
+        <!-- Row 2: date range slider spans cols 2-4, reset in col 5 -->
+        <label style="${labelStyle}">Date Range</label>
+        <div style="grid-column:2/5">
+          <div style="position:relative;height:20px">
+            <div style="position:absolute;height:4px;background:#e2e8f0;top:8px;left:0;right:0;border-radius:2px">
+              <div id="sec3SliderFill" style="position:absolute;height:100%;background:#a855f7;border-radius:2px;left:0%;width:100%"></div>
+            </div>
+            <input type="range" id="sec3SliderFrom" min="0" max="${nd - 1}" value="0" step="1"
+              style="position:absolute;width:100%;height:4px;top:8px;-webkit-appearance:none;appearance:none;background:transparent;accent-color:#a855f7;cursor:pointer">
+            <input type="range" id="sec3SliderTo"   min="0" max="${nd - 1}" value="${nd - 1}" step="1"
+              style="position:absolute;width:100%;height:4px;top:8px;-webkit-appearance:none;appearance:none;background:transparent;accent-color:#a855f7;cursor:pointer">
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:.75rem;color:#475569;font-weight:500">
+            <span id="sec3DateFromLabel">${_sec3DateFrom}</span>
+            <span id="sec3DateToLabel">${_sec3DateTo}</span>
+          </div>
+        </div>
+        <button onclick="_sec3ResetDate()" style="font-size:.7rem;color:#a855f7;background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;white-space:nowrap;text-align:right">Reset</button>
+        ` : ""}
+      </div>
+    </div>
+  `;
+
+  const slider = document.getElementById("vehSlider");
+  const toggle = document.getElementById("vehSliderToggle");
+  const label  = document.getElementById("vehSliderLabel");
+
+  function updateFromSlider() {
+    if (!toggle.checked) {
+      _scatterVeh = null;
+      label.textContent = "Fleet view";
+      label.style.color = "#94a3b8";
+      slider.disabled = true;
+    } else {
+      _scatterVeh = allVeh[+slider.value];
+      label.textContent = _scatterVeh;
+      label.style.color = "#a855f7";
+      slider.disabled = false;
+    }
+    _drawScatter();
+    _drawDeltaChart();
+    _drawEfcSohChart();
+    _drawEfcTimeChart();
+  }
+
+  toggle.addEventListener("change", updateFromSlider);
+  slider.addEventListener("input",  updateFromSlider);
+  updateFromSlider();  // initial state = fleet view
+
+  // Date range slider wiring
+  if (nd > 1) {
+    const fromEl  = document.getElementById("sec3SliderFrom");
+    const toEl    = document.getElementById("sec3SliderTo");
+    const fill    = document.getElementById("sec3SliderFill");
+    const fromLbl = document.getElementById("sec3DateFromLabel");
+    const toLbl   = document.getElementById("sec3DateToLabel");
+
+    // Make only the thumb interactive so both handles are always reachable
+    if (!document.getElementById("sec3SliderStyle")) {
+      const s = document.createElement("style");
+      s.id = "sec3SliderStyle";
+      s.textContent = [
+        "#sec3SliderFrom,#sec3SliderTo{pointer-events:none}",
+        "#sec3SliderFrom::-webkit-slider-thumb{pointer-events:all;cursor:grab}",
+        "#sec3SliderTo::-webkit-slider-thumb{pointer-events:all;cursor:grab}",
+        "#sec3SliderFrom::-moz-range-thumb{pointer-events:all;cursor:grab}",
+        "#sec3SliderTo::-moz-range-thumb{pointer-events:all;cursor:grab}",
+        /* vehicle slider: purple thumb + filled track, #e2e8f0 non-selected track */
+        "#vehSlider{accent-color:#a855f7}",
+        "#vehSlider::-webkit-slider-runnable-track{background:#e2e8f0;border-radius:2px;height:4px}",
+        "#vehSlider::-moz-range-track{background:#e2e8f0;border-radius:2px;height:4px}",
+        "#vehSlider::-webkit-slider-thumb{background:#a855f7;border:none;border-radius:50%;width:14px;height:14px;margin-top:-5px;cursor:pointer}",
+        "#vehSlider::-moz-range-thumb{background:#a855f7;border:none;border-radius:50%;width:14px;height:14px;cursor:pointer}",
+      ].join(" ");
+      document.head.appendChild(s);
+    }
+
+    // Keep the thumb that's further left on top so it stays reachable
+    function syncZIndex() {
+      const lo = parseInt(fromEl.value), hi = parseInt(toEl.value);
+      fromEl.style.zIndex = lo >= hi ? "4" : "2";
+      toEl.style.zIndex   = lo >= hi ? "3" : "4";
+    }
+
+    function updateDateSlider() {
+      let lo = parseInt(fromEl.value), hi = parseInt(toEl.value);
+      if (lo > hi) { if (this === fromEl) { fromEl.value = hi; lo = hi; } else { toEl.value = lo; hi = lo; } }
+      _sec3DateFrom = _sec3DateList[lo];
+      _sec3DateTo   = _sec3DateList[hi];
+      fromLbl.textContent = _sec3DateFrom;
+      toLbl.textContent   = _sec3DateTo;
+      fill.style.left  = (lo / (nd - 1) * 100) + "%";
+      fill.style.width = ((hi - lo) / (nd - 1) * 100) + "%";
+      syncZIndex();
+      _drawScatter();
+      _drawDeltaChart();
+      _drawEfcSohChart();
+      _drawEfcTimeChart();
+    }
+
+    fromEl.addEventListener("input", updateDateSlider);
+    toEl.addEventListener("input",   updateDateSlider);
+    syncZIndex();  // set initial z-index
+  }
+}
+
+function _sec3ResetDate() {
+  const nd = _sec3DateList.length;
+  if (!nd) return;
+  _sec3DateFrom = _sec3DateList[0];
+  _sec3DateTo   = _sec3DateList[nd - 1];
+  const fromEl = document.getElementById("sec3SliderFrom");
+  const toEl   = document.getElementById("sec3SliderTo");
+  if (fromEl) { fromEl.value = 0; }
+  if (toEl)   { toEl.value   = nd - 1; }
+  const fill    = document.getElementById("sec3SliderFill");
+  const fromLbl = document.getElementById("sec3DateFromLabel");
+  const toLbl   = document.getElementById("sec3DateToLabel");
+  if (fill)    { fill.style.left = "0%"; fill.style.width = "100%"; }
+  if (fromLbl) fromLbl.textContent = _sec3DateFrom;
+  if (toLbl)   toLbl.textContent   = _sec3DateTo;
+  _drawScatter();
+  _drawDeltaChart();
+  _drawEfcSohChart();
+  _drawEfcTimeChart();
+}
+
+/* ─── Chart: EFC vs SoH (BMS + EKF two-line trend) ─────────────────────────── */
+function _drawEfcSohChart() {
+  const el = document.getElementById("efcSohPlot");
+  if (!el || !_scatterData || !_scatterData.points) return;
+
+  let pts = _scatterData.points.filter(p => p.cum_efc != null);
+  if (_sec3DateFrom || _sec3DateTo) {
+    pts = pts.filter(p => {
+      const d = _ptDate(p);
+      if (!d) return true;
+      if (_sec3DateFrom && d < _sec3DateFrom) return false;
+      if (_sec3DateTo   && d > _sec3DateTo)   return false;
+      return true;
+    });
+  }
+
+  let bmsTrace, ekfTrace;
+  if (_scatterVeh) {
+    // Single vehicle: lines+markers
+    const vPts = pts.filter(p => p.registration_number === _scatterVeh)
+                    .sort((a, b) => a.cum_efc - b.cum_efc);
+    bmsTrace = {
+      type: "scatter", mode: "lines+markers",
+      x: vPts.map(p => p.cum_efc), y: vPts.map(p => p.soh),
+      line: { color: "#94a3b8", width: 2 }, marker: { size: 3, color: "#94a3b8" },
+      name: "BMS SoH",
+      hovertemplate: "EFC: %{x:.1f}<br>BMS SoH: %{y:.2f}%<extra></extra>",
+    };
+    ekfTrace = {
+      type: "scatter", mode: "lines+markers",
+      x: vPts.map(p => p.cum_efc), y: vPts.map(p => p.ekf_soh),
+      line: { color: "#a855f7", width: 2 }, marker: { size: 3, color: "#a855f7" },
+      name: "EKF SoH",
+      hovertemplate: "EFC: %{x:.1f}<br>EKF SoH: %{y:.2f}%<extra></extra>",
+    };
+  } else {
+    // Fleet view: bin by EFC, compute mean BMS and EKF SoH per bin → single line each
+    const binSize = 10;
+    const efcVals = pts.map(p => p.cum_efc).filter(v => v != null);
+    const efcMax  = efcVals.length ? Math.max(...efcVals) : 0;
+    const bins = [];
+    for (let lo = 0; lo <= efcMax; lo += binSize) bins.push(lo);
+
+    const meanBmsX = [], meanBmsY = [], meanBmsN = [];
+    const meanEkfX = [], meanEkfY = [], meanEkfN = [];
+    for (const lo of bins) {
+      const hi   = lo + binSize;
+      const inBin = pts.filter(p => p.cum_efc >= lo && p.cum_efc < hi);
+      const bmsPts = inBin.map(p => p.soh).filter(v => v != null);
+      const ekfPts = inBin.map(p => p.ekf_soh).filter(v => v != null);
+      const mid  = lo + binSize / 2;
+      if (bmsPts.length) {
+        meanBmsX.push(mid);
+        meanBmsY.push(bmsPts.reduce((s, v) => s + v, 0) / bmsPts.length);
+        meanBmsN.push(bmsPts.length);
+      }
+      if (ekfPts.length) {
+        meanEkfX.push(mid);
+        meanEkfY.push(ekfPts.reduce((s, v) => s + v, 0) / ekfPts.length);
+        meanEkfN.push(ekfPts.length);
+      }
+    }
+    bmsTrace = {
+      type: "scatter", mode: "lines+markers",
+      x: meanBmsX, y: meanBmsY,
+      line: { color: "#94a3b8", width: 2 }, marker: { size: 4, color: "#94a3b8" },
+      name: "BMS SoH (fleet mean)",
+      hovertemplate: "EFC bin ~%{x:.0f}<br>Mean BMS SoH: %{y:.2f}%<br>n=%{customdata}<extra></extra>",
+      customdata: meanBmsN,
+    };
+    ekfTrace = {
+      type: "scatter", mode: "lines+markers",
+      x: meanEkfX, y: meanEkfY,
+      line: { color: "#a855f7", width: 2 }, marker: { size: 4, color: "#a855f7" },
+      name: "EKF SoH (fleet mean)",
+      hovertemplate: "EFC bin ~%{x:.0f}<br>Mean EKF SoH: %{y:.2f}%<br>n=%{customdata}<extra></extra>",
+      customdata: meanEkfN,
+    };
+  }
+
+  const xMax = pts.reduce((m, p) => p.cum_efc != null && p.cum_efc > m ? p.cum_efc : m, 0);
+  const eolLine = {
+    type: "scatter", mode: "lines",
+    x: [0, xMax * 1.05 || 500], y: [80, 80],
+    line: { color: "#ef4444", width: 1.5, dash: "dash" },
+    name: "EOL 80%", hoverinfo: "skip",
+  };
+
+  Plotly.react(el, [bmsTrace, ekfTrace, eolLine], {
+    paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+    margin: { l: 52, r: 12, t: 30, b: 52 },
+    xaxis: { title: { text: "Cumulative EFC", font: { size: 9.5 } }, gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    yaxis: { title: { text: "SoH (%)", font: { size: 9.5 } }, gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    showlegend: true,
+    legend: { x: 0.5, y: 1.0, xanchor: "center", yanchor: "bottom", orientation: "h", font: { size: 8.5 } },
+  }, { displayModeBar: false, responsive: true });
+}
+
+/* ─── Chart: EFC over time + projected EFCs at 80% SoH EOL ─────────────────── */
+function _drawEfcTimeChart() {
+  const el = document.getElementById("efcTimePlot");
+  if (!el || !_efcData) return;
+
+  function _inRange(d) {
+    if (!d) return true;
+    if (_sec3DateFrom && d < _sec3DateFrom) return false;
+    if (_sec3DateTo   && d > _sec3DateTo)   return false;
+    return true;
+  }
+
+  const traces = [];
+  let slopeText = null;
+
+  if (_scatterVeh) {
+    let pts = (_efcData.vehicle_points || [])
+      .filter(p => p.registration_number === _scatterVeh && _inRange(p.date))
+      .sort((a, b) => a.date < b.date ? -1 : 1);
+
+    traces.push({
+      type: "scatter", mode: "lines+markers",
+      x: pts.map(p => p.date), y: pts.map(p => p.cum_efc),
+      line: { color: "#a855f7", width: 2 }, marker: { size: 3, color: "#a855f7" },
+      name: _scatterVeh,
+      hovertemplate: "%{x}<br>EFC: %{y:.1f}<extra></extra>",
+    });
+
+    const proj = (_efcData.projections || []).find(p => p.registration_number === _scatterVeh);
+    if (proj && proj.proj_date && proj.projected_efc_at_eol != null && pts.length) {
+      const last = pts[pts.length - 1];
+      traces.push({
+        type: "scatter", mode: "lines+markers",
+        x: [last.date, proj.proj_date],
+        y: [last.cum_efc, proj.projected_efc_at_eol],
+        line: { color: "#f59e0b", width: 2, dash: "dash" },
+        marker: { size: 7, color: "#f59e0b", symbol: ["circle", "diamond"] },
+        name: `EOL projection (${proj.proj_date})`,
+        hovertemplate: "%{x}<br>EFC: %{y:.1f}<extra></extra>",
+      });
+      if (proj.efc_daily_rate != null) {
+        const rul_yr = proj.ekf_rul_days != null ? (proj.ekf_rul_days / 365.25).toFixed(1) : "—";
+        slopeText = `EFC rate: <b>${proj.efc_daily_rate.toFixed(3)}/day</b> · EKF RUL: ${rul_yr} yr · Projected EFC at EOL: <b>${Math.round(proj.projected_efc_at_eol).toLocaleString()}</b>`;
+      }
+    }
+  } else {
+    let ft = (_efcData.fleet_trend || []).filter(p => _inRange(p.date)).sort((a, b) => a.date < b.date ? -1 : 1);
+    traces.push({
+      type: "scatter", mode: "lines",
+      x: ft.map(p => p.date), y: ft.map(p => p.fleet_median_cum_efc),
+      line: { color: "#a855f7", width: 2 },
+      fill: "tozeroy", fillcolor: "rgba(168,85,247,0.07)",
+      name: "Fleet median EFC",
+      hovertemplate: "%{x}<br>Median EFC: %{y:.1f}<extra></extra>",
+    });
+
+    const projs = (_efcData.projections || []).filter(p => p.projected_efc_at_eol != null && p.last_date != null && p.efc_daily_rate != null);
+    if (projs.length && ft.length) {
+      const sortNum = arr => [...arr].sort((a, b) => a - b);
+      const mid = arr => arr[Math.floor(arr.length / 2)];
+      const medRate = mid(sortNum(projs.map(p => p.efc_daily_rate)));
+      const medRUL  = mid(sortNum(projs.map(p => p.ekf_rul_days).filter(Boolean)));
+      const medProj = mid(sortNum(projs.map(p => p.projected_efc_at_eol)));
+      const lastPt  = ft[ft.length - 1];
+
+      if (medRUL && medProj) {
+        const projDate = new Date(lastPt.date);
+        projDate.setDate(projDate.getDate() + Math.round(medRUL));
+        const projDateStr = projDate.toISOString().slice(0, 10);
+
+        traces.push({
+          type: "scatter", mode: "lines+markers",
+          x: [lastPt.date, projDateStr],
+          y: [lastPt.fleet_median_cum_efc, medProj],
+          line: { color: "#f59e0b", width: 2, dash: "dash" },
+          marker: { size: 7, color: "#f59e0b", symbol: ["circle", "diamond"] },
+          name: "Fleet median EOL projection",
+          hovertemplate: "%{x}<br>Projected EFC: %{y:.1f}<extra></extra>",
+        });
+        const rul_yr = (medRUL / 365.25).toFixed(1);
+        slopeText = `Median EFC rate: <b>${medRate.toFixed(3)}/day</b> · Median EKF RUL: ${rul_yr} yr · Median projected EFC at EOL: <b>${Math.round(medProj).toLocaleString()}</b>`;
+      }
+    }
+  }
+
+  const annotations = slopeText ? [{
+    x: 0.5, y: 1.02, xref: "paper", yref: "paper",
+    text: slopeText, showarrow: false, align: "center", yanchor: "bottom",
+    font: { size: 8.5, color: "#475569", family: "Plus Jakarta Sans" },
+    bgcolor: "rgba(255,255,255,.88)", borderpad: 3, bordercolor: "#e2e8f0", borderwidth: 1,
+  }] : [];
+
+  Plotly.react(el, traces, {
+    paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+    margin: { l: 52, r: 12, t: 38, b: 52 },
+    xaxis: { title: { text: "Date", font: { size: 9.5 } }, gridcolor: "#e2e8f0", tickangle: -30, tickfont: { size: 8.5 } },
+    yaxis: { title: { text: "Cumulative EFC", font: { size: 9.5 } }, gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    showlegend: true,
+    legend: { x: 0.5, y: 1.0, xanchor: "center", yanchor: "bottom", orientation: "h", font: { size: 8.5 } },
+    annotations,
+  }, { displayModeBar: false, responsive: true });
+}
+
+/* ─── Key Degradation Signals — plain-English definitions for ⓘ hover ─────────── */
+const SIGNAL_DEFS = {
+  days_since_first_session: "Total calendar days since this vehicle's first recorded session — captures time-based degradation independent of usage.",
+  days_since_first:         "Total calendar days since this vehicle's first recorded session — captures time-based degradation independent of usage.",
+  cum_efc:                  "Cumulative equivalent full charge cycles — counts the total charge throughput normalised to one full 0→100% charge.",
+  thermal_stress:           "Composite measure of heat stress: integrates temperature rise rate and high-temperature exposure across sessions.",
+  dod_stress:               "Depth-of-discharge stress — deeper discharges accelerate cathode degradation; higher values mean more aggressive cycling.",
+  ir_ohm_mean_ewm10:        "Exponentially-weighted moving average of cell internal resistance (Ω). Rising IR signals electrolyte ageing or contact loss.",
+  ir_ohm_trend_slope:       "Long-run slope of internal resistance over time. A positive slope means IR is systematically growing.",
+  ir_event_trend_slope:     "Trend in the rate of high-IR events (spikes above threshold). Increasing events indicate accelerating degradation.",
+  ir_event_rate:            "Fraction of sessions with at least one high-IR event — a proxy for how often the pack is operating outside healthy limits.",
+  cell_spread_mean_ewm10:   "EWM-smoothed average of max−min cell voltage spread. Larger spread means cells are diverging in capacity or health.",
+  spread_trend_slope:       "Trend in cell voltage spread over time. A rising slope means cells are diverging faster.",
+  vsag_rate_per_hr_ewm10:   "Rate of voltage sag events per hour of operation (EWM-smoothed). Frequent sags indicate rising polarisation or weak cells.",
+  vsag_trend_slope:         "Trend in the voltage sag rate over time. A positive slope means sag events are becoming more frequent.",
+  n_vsag:                   "Count of voltage sag events in the session — momentary dips under load pointing to high impedance or capacity fade.",
+  temp_rise_rate_ewm10:     "EWM-smoothed rate of temperature rise during operation (°C/min). Faster heating indicates increasing internal resistance.",
+  energy_per_km:            "Energy consumed per kilometre of travel (kWh/km). Higher values may reflect pack inefficiency or heavier loads.",
+  energy_per_loaded_session:"Energy delivered per session, normalised for load type (loaded vs unloaded). Captures efficiency trends across trip types.",
+  energy_kwh:               "Total energy throughput in the session (kWh). High throughput sessions contribute more to electrochemical wear.",
+  capacity_ah_discharge_new:"Raw motoring Ah delivered this session (hves1 sensor). Large values represent high-throughput discharge stress.",
+  block_capacity_ah:        "Cumulative Ah discharged across the full discharge block. Reflects the total electrochemical work in one block.",
+  c_rate_chg:               "Charge C-rate — ratio of charging current to rated capacity. Higher C-rates cause more lithium plating and heat stress.",
+  charging_rate_kw:         "Average charging power (kW). Faster charging increases heat and lithium plating risk.",
+  cycle_soh:                "Per-cycle SoH estimate (capacity method). Direct measure of capacity fade from one full discharge cycle.",
+  aging_index:              "Composite aging index combining calendar and cycle stress into a single degradation predictor.",
+  soh_trend_slope:          "Local slope of BMS-reported SoH over recent sessions — the rate at which the BMS sees capacity declining.",
+  n_high_ir:                "Count of sessions with abnormally high internal resistance events — a proxy for electrolyte or SEI layer degradation.",
+  n_low_soc:                "Count of sessions where SoC dipped to a critically low level. Deep discharges accelerate cathode stress.",
+  odometer_km:              "This session's trip distance (km). Longer trips mean more discharge depth per session.",
+  block_odometer_km:        "Cumulative trip distance across the whole discharge block (km).",
+  duration_hr:              "Session duration in hours. Longer sessions accumulate more electrochemical stress.",
+  is_loaded:                "Whether the vehicle carried a load. Loaded trips draw more current and discharge deeper.",
+  speed_mean:               "Mean travel speed (km/h). Higher speeds typically correlate with higher motor current and discharge rate.",
+};
+
 /* ─── Key Degradation Signals (Bayesian ridge coefficients — negative only) ───── */
 function renderBayesCoef(data) {
-  const el = document.getElementById("bayesCoefPlot");
+  const el   = document.getElementById("bayesCoefPlot");
+  const ciEl = document.getElementById("bayesCoefCIPlot");
   if (!el || !data || !data.global) return;
 
-  const raw = data.global;
+  const raw    = data.global;
+  const spread = data.coef_spread || {};
+
   // Keep only negative coefficients (signals that drive SoH decline), sort most harmful first
   const sorted = Object.entries(raw)
     .filter(([, v]) => v != null && isFinite(v) && v < 0)
@@ -159,43 +760,218 @@ function renderBayesCoef(data) {
 
   if (!sorted.length) return;
 
-  const labels = sorted.map(([k]) => COEF_LABEL_MAP[k] || k);
-  const values = sorted.map(([, v]) => +Math.abs(v).toFixed(5));  // absolute → bars go upward
+  const nBars  = sorted.length;
+  const chartH = Math.max(220, nBars * 44 + 80);
 
+  const labels  = sorted.map(([k]) => COEF_LABEL_MAP[k] || k);
+  const values  = sorted.map(([, v]) => +v.toFixed(5));   // actual negative values
+  const defs    = sorted.map(([k]) => SIGNAL_DEFS[k] || "No definition available.");
+
+  el.style.height = chartH + "px";
+
+  // Horizontal bar chart — negative x + reversed axis = bars extend left→right from 0
   Plotly.newPlot(el, [{
     type: "bar",
-    x: labels,
-    y: values,
-    marker: { color: "#ef4444", opacity: 0.8 },
-    hovertemplate: "%{x}<br>Degradation weight: %{y:.5f}<extra></extra>",
+    orientation: "h",
+    y: labels,
+    x: values,
+    customdata: defs,
+    marker: { color: "#a855f7", opacity: 0.8 },
+    hovertemplate: "<b>%{y}</b><br>Coefficient: <b>%{x:.5f}</b><br><br><span style='color:white;font-style:italic'>%{customdata}</span><extra></extra>",
   }], {
     paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
     font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
-    margin: { l: 44, r: 12, t: 12, b: 110 },
-    xaxis: { tickfont: { size: 8 }, tickangle: -40, automargin: true },
-    yaxis: { title: { text: "Degradation weight", font: { size: 9 } },
-             gridcolor: "#e2e8f0", tickfont: { size: 9 } },
+    margin: { l: 150, r: 16, t: 12, b: 48 },
+    xaxis: { title: { text: "Coefficient (negative = degradation driver)", font: { size: 9 } },
+             gridcolor: "#e2e8f0", tickfont: { size: 8.5 }, autorange: "reversed" },
+    yaxis: { autorange: "reversed", automargin: true, tickfont: { size: 9.5 } },
     showlegend: false,
   }, { displayModeBar: false, responsive: true });
+
+  // ── CI / spread forest plot ────────────────────────────────────────────────
+  if (ciEl) {
+    const ciLabels = [], ciMedians = [], ciErrArr = [], ciErrMinus = [], ciColors = [], ciDefs = [];
+
+    sorted.forEach(([k, median]) => {
+      const s = spread[k];
+      ciLabels.push(COEF_LABEL_MAP[k] || k);
+      ciMedians.push(median);
+      if (s) {
+        const p25 = s.p25, p75 = s.p75;
+        const significant = p25 < 0 && p75 < 0;
+        let errArr   = Math.max(0, p75 - median);   // toward 0
+        let errMinus = Math.max(0, median - p25);   // away from 0
+        const singleVehicle = errArr === 0 && errMinus === 0;
+        if (singleVehicle) {
+          // n=1 vehicle — show ±12% of coefficient as visual reference band
+          errArr = errMinus = Math.abs(median) * 0.12;
+        }
+        ciErrArr.push(errArr);
+        ciErrMinus.push(errMinus);
+        ciColors.push(significant ? "#a855f7" : "#cbd5e1");
+        ciDefs.push(singleVehicle
+          ? "Significant — n=1 vehicle; bands show ±12% visual reference (no fleet IQR)"
+          : significant ? "Significant (CI excludes 0)" : "Not significant across fleet");
+      } else {
+        ciErrArr.push(null);
+        ciErrMinus.push(null);
+        // No spread data: color by coefficient sign (all items here are < 0)
+        ciColors.push(median < 0 ? "#a855f7" : "#94a3b8");
+        ciDefs.push("Fleet-wide spread data unavailable");
+      }
+    });
+
+    ciEl.style.height = chartH + "px";
+
+    Plotly.newPlot(ciEl, [{
+      type: "scatter",
+      mode: "markers",
+      y: ciLabels,
+      x: ciMedians,
+      customdata: ciDefs,
+      marker: { symbol: "diamond", size: 9, color: ciColors },
+      error_x: {
+        type: "data",
+        symmetric: false,
+        array:      ciErrArr,    // toward 0 (+x, visually left on reversed axis)
+        arrayminus: ciErrMinus,  // away from 0 (-x, visually right on reversed axis)
+        visible: true,
+        color: "#94a3b8",
+        thickness: 1.5,
+        width: 5,
+      },
+      hovertemplate: "<b>%{y}</b><br>Coefficient: %{x:.5f}<br>%{customdata}<extra></extra>",
+    }, {
+      type: "scatter", mode: "lines",
+      x: [0, 0], y: [ciLabels[0] || "", ciLabels[ciLabels.length - 1] || ""],
+      line: { color: "#64748b", width: 1, dash: "dot" },
+      hoverinfo: "skip", showlegend: false,
+    }], {
+      paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+      font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+      margin: { l: 10, r: 16, t: 12, b: 48 },
+      xaxis: { title: { text: "Coefficient (IQR spread)", font: { size: 9 } },
+               gridcolor: "#e2e8f0", tickfont: { size: 8.5 },
+               zeroline: true, zerolinecolor: "#64748b", zerolinewidth: 1.5,
+               autorange: "reversed" },
+      yaxis: { autorange: "reversed", showticklabels: false, gridcolor: "#e2e8f0" },
+      showlegend: false,
+      annotations: [{
+        xref: "paper", yref: "paper", x: 0.5, y: -0.14, xanchor: "center", yanchor: "top", showarrow: false,
+        text: "<span style='color:#a855f7'>◆ significant</span> &nbsp; <span style='color:#cbd5e1'>◆ not significant</span> &nbsp; bars = IQR across fleet",
+        font: { size: 8.5, family: "Plus Jakarta Sans" },
+      }],
+    }, { displayModeBar: false, responsive: true });
+  }
+
+  // ── Description — only significant variables ───────────────────────────────
+  const descEl = document.getElementById("bayesCoefDesc");
+  if (descEl) {
+    const unitOf = (k) => {
+      if (k.includes("day") || k === "days_since_first_session") return "calendar day";
+      if (k === "cum_efc")             return "equivalent full cycle";
+      if (k === "thermal_stress")      return "unit of thermal stress";
+      if (k === "dod_stress")          return "unit of DoD stress";
+      if (k.includes("ir_ohm"))        return "mΩ of internal resistance";
+      if (k.includes("ir_event"))      return "IR event";
+      if (k.includes("spread"))        return "mV of cell spread";
+      if (k.includes("vsag"))          return "V-sag event";
+      if (k.includes("temp"))          return "°C/min of temp rise";
+      if (k.includes("energy_per_km")) return "kWh/km";
+      if (k.includes("energy_kwh") || k.includes("energy_per_loaded")) return "kWh";
+      if (k.includes("capacity_ah"))   return "Ah";
+      if (k.includes("c_rate") || k.includes("charging_rate")) return "C-rate unit";
+      if (k.includes("cycle_soh") || k.includes("soh_trend")) return "% SoH unit";
+      if (k.includes("odometer") || k === "odometer_km") return "km";
+      if (k.includes("duration"))      return "hour";
+      return "unit";
+    };
+
+    // Significant = CI excludes 0 (both p25 < 0 and p75 < 0)
+    const sigSorted = sorted.filter(([k]) => {
+      const s = spread[k];
+      return s && s.p25 < 0 && s.p75 < 0;
+    });
+    const descList = (sigSorted.length ? sigSorted : sorted).slice(0, 5);
+
+    const sentences = descList.map(([k, v]) => {
+      const label  = COEF_LABEL_MAP[k] || k;
+      const weight = Math.abs(v).toFixed(4);
+      return `<b>${label}</b> (−${weight}% per ${unitOf(k)})`;
+    });
+
+    const sigNote = sigSorted.length
+      ? `${sigSorted.length} of ${sorted.length} signals are fleet-wide significant (CI excludes 0).`
+      : "";
+    descEl.innerHTML =
+      `The model's key degradation drivers: ${sentences.join(", ")}. ${sigNote}`.trim();
+  }
 }
 
 /* ─── Anomaly tiers ──────────────────────────────────────────────────────────── */
 function renderAnomalyTiers() {
   const d = _tiers;
 
-  const vRow = (v, signal, color) =>
-    `<tr style="cursor:pointer" onclick="openVehicleDetail('${v.registration_number}')">
-      <td><span style="font-size:.8rem;font-weight:700;color:${color}">${v.registration_number}</span></td>
-      <td class="text-muted">${signal || ""}</td>
+  const eol = (_overview && _overview.eol_threshold) || 80;
+  // Compute RUL the same way as the RUL scatter chart: (SoH headroom) / |daily slope|
+  const rulDisplay = (v) => {
+    const days = v.rul_days;  // EKF RUL from server (ekf_rul_days)
+    if (days == null) return "—";
+    return `${Math.round(days).toLocaleString()} d<br><span style="color:#94a3b8;font-size:.75rem">(${(days/365.25).toFixed(1)} yr)</span>`;
+  };
+
+  const vRow = (v, signal, color) => {
+    // Replace hardcoded degradation score and EKF RUL with live computed values.
+    const liveScore = v.composite != null ? (v.composite * 100).toFixed(1) : null;
+    const liveRulYr = v.rul_days != null ? (v.rul_days / 365.25).toFixed(1) : null;
+    let rawSignal = liveScore
+      ? (signal || "").replace(/degradation risk score\s*\(?[0-9.]+\)?/gi,
+                               `degradation risk score (${liveScore})`)
+      : (signal || "");
+    if (liveRulYr) {
+      rawSignal = rawSignal.replace(/EKF RUL\s*[0-9.]+ years?/gi, `EKF RUL ${liveRulYr} years`);
+    }
+    // Split reasons on semicolon or comma so each appears on its own line
+    const reasonParts = rawSignal.split(/;\s*|,\s*(?=[A-Z]|high|low|elevated|abnormal|excess|rapid)/i)
+      .map(s => s.trim()).filter(Boolean);
+    const signalHtml = reasonParts.length > 1
+      ? reasonParts.map(s => `<div style="line-height:1.4">${s}</div>`).join("")
+      : rawSignal;
+
+    // Badge color matches bar-chart RUL color for this vehicle
+    const { bg: badgeBg, fg: badgeFg } = _barColorForReg(v.registration_number);
+    const tierNum = v.tier || color;  // fallback
+
+    return `<tr class="tier-vehicle-row" data-reg="${v.registration_number}"
+         style="cursor:pointer;transition:background .12s"
+         onclick="openVehicleDetail('${v.registration_number}');_tierMarkActive(this)">
+      <td>
+        <a class="tier-reg-link" style="font-size:.67rem;font-weight:700;color:#2563eb;
+           text-decoration:underline;text-underline-offset:2px;cursor:pointer;
+           display:inline-flex;align-items:center;gap:4px"
+           title="Click to open vehicle detail">
+          ${v.registration_number}
+          <span style="font-size:.65rem;opacity:.75;color:#64748b">↗</span>
+        </a>
+      </td>
+      <td class="text-muted" style="min-width:180px">${signalHtml}</td>
       <td class="text-end">${fmtPct(v.current_soh)}</td>
       <td class="text-end">${fmt(v.soh_slope, 4)}</td>
-      <td class="text-end fw-bold">${fmt(v.composite, 4)}</td>
+      <td class="text-end fw-bold">${v.composite != null ? (v.composite * 100).toFixed(1) : "—"}</td>
+      <td class="text-end">${rulDisplay(v)}</td>
       <td class="text-end">${v.n_combined_anom}</td>
     </tr>`;
+  };
 
   document.querySelector("#tier1Table tbody").innerHTML = d.tier1.map(v => vRow(v, v.primary_signal, "#dc2626")).join("");
   document.querySelector("#tier2Table tbody").innerHTML = d.tier2.map(v => vRow(v, v.note,           "#d97706")).join("");
   document.querySelector("#tier3Table tbody").innerHTML = d.tier3.map(v => vRow(v, v.note,           "#059669")).join("");
+}
+
+/* ─── Tier row active state ──────────────────────────────────────────────────── */
+function _tierMarkActive(row) {
+  document.querySelectorAll(".tier-vehicle-row.tier-active").forEach(r => r.classList.remove("tier-active"));
+  row.classList.add("tier-active");
 }
 
 /* ─── Hover chart setup ──────────────────────────────────────────────────────── */
@@ -205,6 +981,7 @@ const HOVER_FNS = {
   std_soh:           chartSohStdDev,
   trend:             chartSohTrend,
   ekf_rul:           chartVehicleRul,
+  ekf_rul_range:     chartRulRangeBollinger,
   eol:               chartEolInfo,
   data_span:         chartDataSpan,
   population:        chartPopulation,
@@ -214,6 +991,7 @@ const HOVER_FNS = {
   kpi_rul:           chartRulHistogram,
   kpi_remaining_efc: chartRemainingEfc,
   kpi_period:        chartDataSpan,
+  kpi_vehicles:      showVehicleList,
 };
 
 function setupHoverCharts() {
@@ -268,8 +1046,8 @@ function showHoverChart(type, rowEl) {
   const plotEl = document.getElementById("hoverPlot");
   const textEl = document.getElementById("hoverText");
   const rect   = rowEl.getBoundingClientRect();
-  const isText = type === "eol";
-  const panelH = isText ? 180 : 300;
+  const isText = type === "eol" || type === "kpi_vehicles";
+  const panelH = isText ? (type === "kpi_vehicles" ? 340 : 180) : 300;
 
   // Position panel
   const panelW = 480;
@@ -303,31 +1081,65 @@ function hideHoverChart() {
   document.getElementById("hoverPanel").style.display = "none";
 }
 
-/* ─── Chart: vehicle SoH bar ─────────────────────────────────────────────────── */
+/* ─── Chart: fleet mean EKF SoH over time ────────────────────────────────────── */
 function chartVehicleSoh(plotEl) {
-  // Sort descending so highest SoH is leftmost
-  const sorted = [..._vehicles]
-    .filter(v => v.current_soh != null)
-    .sort((a, b) => b.current_soh - a.current_soh);
+  if (!_trend || !_trend.length) return;
 
-  const colors = sorted.map(v =>
-    v.current_soh >= 97 ? "#22c55e" :
-    v.current_soh >= 95 ? "#f59e0b" : "#ef4444"
-  );
+  const dates = _trend.map(r => r.date);
+  const sohs  = _trend.map(r => r.median_soh);
+  const minY  = Math.min(...sohs);
+  const maxY  = Math.max(...sohs);
+
+  const sohShapes = [
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 80, y1: 97,
+      fillcolor: "rgba(239,68,68,0.13)",  line: { width: 0 } },
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 97, y1: 98,
+      fillcolor: "rgba(245,158,11,0.13)", line: { width: 0 } },
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 98, y1: 100,
+      fillcolor: "rgba(34,197,94,0.13)",  line: { width: 0 } },
+    // Cutoff lines
+    { type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 97, y1: 97,
+      line: { color: "rgba(245,158,11,0.65)", width: 1.5, dash: "dot" } },
+    { type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 98, y1: 98,
+      line: { color: "rgba(34,197,94,0.65)",  width: 1.5, dash: "dot" } },
+  ];
+
+  const sohAnnotations = [
+    // Region labels
+    { xref: "paper", yref: "y", x: 0.02, y: 96.75, xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Low SoH",
+      font: { size: 8, color: "rgba(220,38,38,0.80)", family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    { xref: "paper", yref: "y", x: 0.02, y: 97.5,  xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Watch",
+      font: { size: 8, color: "rgba(161,87,0,0.85)",  family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    { xref: "paper", yref: "y", x: 0.02, y: 99,    xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Healthy",
+      font: { size: 8, color: "rgba(22,163,74,0.85)", family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    // Cutoff value labels
+    { xref: "paper", yref: "y", x: 0.985, y: 97, xanchor: "right", yanchor: "bottom", showarrow: false,
+      text: "97%",
+      font: { size: 8, color: "rgba(161,87,0,0.90)", family: "Plus Jakarta Sans, system-ui, sans-serif" },
+      bgcolor: "rgba(255,255,255,0.75)", borderpad: 2 },
+    { xref: "paper", yref: "y", x: 0.985, y: 98, xanchor: "right", yanchor: "bottom", showarrow: false,
+      text: "98%",
+      font: { size: 8, color: "rgba(22,163,74,0.90)", family: "Plus Jakarta Sans, system-ui, sans-serif" },
+      bgcolor: "rgba(255,255,255,0.75)", borderpad: 2 },
+  ];
 
   Plotly.newPlot(plotEl, [{
-    type: "bar",
-    x: sorted.map(v => v.registration_number),
-    y: sorted.map(v => v.current_soh),
-    marker: { color: colors },
-    hovertemplate: "%{x}<br>SoH: %{y:.2f}%<extra></extra>",
+    type: "scatter", mode: "lines",
+    x: dates, y: sohs,
+    line: { color: "#a855f7", width: 2, shape: "spline", smoothing: 0.8 },
+    hovertemplate: "%{x}<br>Fleet Mean EKF SoH: %{y:.3f}%<extra></extra>",
   }], {
-    ...baseLayout("EKF SoH per vehicle"),
+    ...baseLayout("Fleet Mean EKF SoH"),
     width: undefined,
     height: 282,
-    xaxis: { tickfont: { size: 7.5, color: "#1e293b" }, tickangle: -40, automargin: true },
-    yaxis: { ...yAx("SoH (%)"), range: [93, 100] },
+    xaxis: { ...xAx(), title: { text: "Time", font: { size: 9 } }, tickangle: -40 },
+    yaxis: { ...yAx("Fleet Mean EKF SoH %"), range: [Math.min(minY - 0.3, 96.5), maxY + 0.3] },
     margin: { t: 34, b: 70, l: 46, r: 14 },
+    shapes: sohShapes,
+    annotations: sohAnnotations,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -337,17 +1149,17 @@ function chartSohStdDev(plotEl) {
   const mu  = _overview.fleet_mean_soh;
   const sig = _overview.fleet_std_soh;
   const lo  = mu - 1.96 * sig;
-  const hi  = mu + 1.96 * sig;
+  const hi  = Math.min(mu + 1.96 * sig, 100);  // cap at 100%
 
   Plotly.newPlot(plotEl, [{
     type: "histogram",
     x: sohVals,
     nbinsx: 6,
-    marker: { color: "#3b82f6", opacity: 0.75 },
+    marker: { color: "#a855f7", opacity: 0.75 },
     hovertemplate: "SoH: %{x:.2f}%<br>Count: %{y}<extra></extra>",
   }], {
     ...baseLayout(`SoH Distribution   µ=${mu.toFixed(3)}%  σ=${sig.toFixed(3)}%`),
-    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } } },
+    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } }, autorange: "reversed" },
     yaxis: { ...yAx("Count") },
     shapes: [
       {
@@ -355,7 +1167,7 @@ function chartSohStdDev(plotEl) {
         type: "rect",
         x0: lo, x1: hi, y0: 0, y1: 1,
         xref: "x", yref: "paper",
-        fillcolor: "rgba(59,130,246,0.10)",
+        fillcolor: "rgba(168,85,247,0.10)",
         line: { width: 0 },
       },
       {
@@ -408,63 +1220,107 @@ function chartSohTrend(plotEl) {
   const last   = sohs[sohs.length - 1];
   const slope  = _overview.soh_trend_pct;
   const sign   = slope >= 0 ? "+" : "";
-  const lineColor = last < first ? "#ef4444" : "#3b82f6";
-  const fillColor = last < first ? "rgba(239,68,68,0.08)" : "rgba(59,130,246,0.08)";
+  const lineColor = "#a855f7";
+  const fillColor = "rgba(168,85,247,0.08)";
 
   const minY = Math.min(...sohs);
   const maxY = Math.max(...sohs);
   const pad  = Math.max((maxY - minY) * 0.3, 0.05);
+
+  const sohShapes = [
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 80,  y1: 97,
+      fillcolor: "rgba(239,68,68,0.13)",  line: { width: 0 } },
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 97,  y1: 98,
+      fillcolor: "rgba(245,158,11,0.13)", line: { width: 0 } },
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 98,  y1: 100,
+      fillcolor: "rgba(34,197,94,0.13)",  line: { width: 0 } },
+    // Cutoff lines
+    { type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 97, y1: 97,
+      line: { color: "rgba(245,158,11,0.65)", width: 1.5, dash: "dot" } },
+    { type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 98, y1: 98,
+      line: { color: "rgba(34,197,94,0.65)",  width: 1.5, dash: "dot" } },
+  ];
+
+  const sohAnnotations = [
+    // Region labels
+    { xref: "paper", yref: "y", x: 0.02, y: 96.75, xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Low SoH",
+      font: { size: 8, color: "rgba(220,38,38,0.80)", family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    { xref: "paper", yref: "y", x: 0.02, y: 97.5,  xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Watch",
+      font: { size: 8, color: "rgba(161,87,0,0.85)",  family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    { xref: "paper", yref: "y", x: 0.02, y: 99,    xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Healthy",
+      font: { size: 8, color: "rgba(22,163,74,0.85)", family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    // Cutoff value labels
+    { xref: "paper", yref: "y", x: 0.985, y: 97, xanchor: "right", yanchor: "bottom", showarrow: false,
+      text: "97%",
+      font: { size: 8, color: "rgba(161,87,0,0.90)", family: "Plus Jakarta Sans, system-ui, sans-serif" },
+      bgcolor: "rgba(255,255,255,0.75)", borderpad: 2 },
+    { xref: "paper", yref: "y", x: 0.985, y: 98, xanchor: "right", yanchor: "bottom", showarrow: false,
+      text: "98%",
+      font: { size: 8, color: "rgba(22,163,74,0.90)", family: "Plus Jakarta Sans, system-ui, sans-serif" },
+      bgcolor: "rgba(255,255,255,0.75)", borderpad: 2 },
+  ];
 
   Plotly.newPlot(plotEl, [
     {
       type: "scatter", mode: "lines",
       x: dates, y: sohs,
       line: { color: lineColor, width: 2, shape: "spline", smoothing: 0.8 },
-      fill: "tonexty", fillcolor: fillColor,
       hovertemplate: "%{x}<br>Fleet median SoH: %{y:.3f}%<extra></extra>",
       name: "Fleet median SoH",
     },
   ], {
     ...baseLayout(`Fleet SoH Trend   ${sign}${slope.toFixed(2)}% over ${_overview.span_days} days`),
-    yaxis: { ...yAx("EKF SoH (%)"), range: [minY - pad, maxY + pad] },
-    xaxis: { ...xAx() },
+    yaxis: { ...yAx("EKF SoH %"), range: [minY - pad, maxY + pad] },
+    xaxis: { ...xAx(), title: { text: "Time", font: { size: 9 } } },
+    shapes: sohShapes,
+    annotations: sohAnnotations,
   }, cfg());
 }
 
 /* ─── Chart: vehicle RUL bar ─────────────────────────────────────────────────── */
 function chartVehicleRul(plotEl) {
   const field = v => v.ekf_rul_days != null ? v.ekf_rul_days : v.rul_days;
-  const all = [..._vehicles].filter(v => field(v) != null);
+  const rulYears = _vehicles
+    .filter(v => field(v) != null && field(v) > 0)
+    .map(v => +(field(v) / 365.25).toFixed(2));
 
-  // Outlier removal: exclude values above Q3 + 3×IQR
-  const vals  = all.map(v => field(v)).sort((a, b) => a - b);
-  const q1    = vals[Math.floor(vals.length * 0.25)];
-  const q3    = vals[Math.floor(vals.length * 0.75)];
-  const fence = q3 + 3 * (q3 - q1);
+  if (!rulYears.length) { Plotly.purge(plotEl); return; }
 
-  // Sort descending so longest RUL is leftmost
-  const sorted = all
-    .filter(v => field(v) <= fence)
-    .sort((a, b) => field(b) - field(a));
+  const CAP = 10;
+  const binEdges = Array.from({ length: CAP }, (_, i) => i);
+  const labels = binEdges.map(b => `${b}–${b + 1}`).concat(["10+"]);
+  const counts = binEdges
+    .map(b => rulYears.filter(v => v >= b && v < b + 1).length)
+    .concat([rulYears.filter(v => v >= CAP).length]);
 
-  const colors = sorted.map(v =>
-    field(v) > 730 ? "#22c55e" :
-    field(v) > 365 ? "#f59e0b" : "#ef4444"
-  );
+  const med = _overview.median_ekf_rul != null
+    ? +(_overview.median_ekf_rul / 365.25).toFixed(2) : null;
+
+  const annotations = [];
+  if (med != null) {
+    const medLabel = med >= CAP ? "10+" : `${Math.floor(med)}–${Math.floor(med) + 1}`;
+    annotations.push({ x: medLabel, y: 0.98, xref: "x", yref: "paper",
+      text: `Median ${med.toFixed(2)} yr`, showarrow: true, ax: 0, ay: -20,
+      font: { size: 8.5, color: "#1e293b", family: "Plus Jakarta Sans" },
+      bgcolor: "rgba(255,255,255,0.8)", borderpad: 2 });
+  }
 
   Plotly.newPlot(plotEl, [{
     type: "bar",
-    x: sorted.map(v => v.registration_number),
-    y: sorted.map(v => +(field(v) / 365.25).toFixed(2)),
-    marker: { color: colors },
-    hovertemplate: "%{x}<br>RUL: %{y:.2f} yr<extra></extra>",
+    x: labels, y: counts,
+    marker: { color: "#a855f7", opacity: 0.75 },
+    hovertemplate: "RUL: %{x} yr<br>Count: %{y}<extra></extra>",
   }], {
-    ...baseLayout("EKF RUL per vehicle"),
+    ...baseLayout("EKF RUL Distribution (years)"),
     width: undefined,
     height: 282,
-    xaxis: { tickfont: { size: 7.5, color: "#1e293b" }, tickangle: -40, automargin: true },
-    yaxis: { ...yAx("RUL (years)") },
+    xaxis: { ...xAx(), title: { text: "RUL (years)", font: { size: 9 } }, tickangle: -40 },
+    yaxis: { ...yAx("Count") },
     margin: { t: 34, b: 70, l: 46, r: 14 },
+    annotations,
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -474,21 +1330,21 @@ function chartSohHistogram(plotEl) {
   const mu  = _overview.fleet_mean_soh;
   const sig = _overview.fleet_std_soh;
   const lo  = mu - 1.96 * sig;
-  const hi  = mu + 1.96 * sig;
+  const hi  = Math.min(mu + 1.96 * sig, 100);  // cap at 100%
 
   Plotly.newPlot(plotEl, [{
     type: "histogram",
     x: sohVals,
     nbinsx: 6,
-    marker: { color: "#3b82f6", opacity: 0.75 },
+    marker: { color: "#a855f7", opacity: 0.75 },
     hovertemplate: "SoH: %{x:.2f}%<br>Count: %{y}<extra></extra>",
   }], {
     ...baseLayout(`SoH Distribution   µ=${mu.toFixed(3)}%  σ=${sig.toFixed(3)}%`),
-    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } } },
+    xaxis: { ...xAx(), title: { text: "SoH (%)", font: { size: 9 } }, autorange: "reversed" },
     yaxis: { ...yAx("Count") },
     shapes: [
       { type: "rect", x0: lo, x1: hi, y0: 0, y1: 1,
-        xref: "x", yref: "paper", fillcolor: "rgba(59,130,246,0.10)", line: { width: 0 } },
+        xref: "x", yref: "paper", fillcolor: "rgba(168,85,247,0.10)", line: { width: 0 } },
       { type: "line", x0: mu, x1: mu, y0: 0, y1: 1,
         xref: "x", yref: "paper", line: { color: "#1e293b", width: 1.5, dash: "dash" } },
     ],
@@ -512,34 +1368,36 @@ function chartRulHistogram(plotEl) {
 
   if (!rulYears.length) { Plotly.purge(plotEl); return; }
 
+  // Build 1-year bins from 0–10, then one "10+" bucket
+  const CAP = 10;
+  const binEdges = Array.from({ length: CAP }, (_, i) => i);  // [0,1,...,9]
+  const labels = binEdges.map(b => `${b}–${b + 1}`).concat(["10+"]);
+  const counts = binEdges
+    .map(b => rulYears.filter(v => v >= b && v < b + 1).length)
+    .concat([rulYears.filter(v => v >= CAP).length]);
+
   const med = _overview.median_ekf_rul != null
     ? +(_overview.median_ekf_rul / 365.25).toFixed(2) : null;
 
-  const shapes = [], annotations = [];
+  const annotations = [];
   if (med != null) {
-    shapes.push({ type: "line", x0: med, x1: med, y0: 0, y1: 1,
-      xref: "x", yref: "paper", line: { color: "#1e293b", width: 1.5, dash: "dash" } });
-    annotations.push({ x: med, y: 0.98, xref: "x", yref: "paper",
-      text: `Median ${med.toFixed(2)} yr`, showarrow: false,
+    // Find which bin label the median falls in
+    const medLabel = med >= CAP ? "10+" : `${Math.floor(med)}–${Math.floor(med) + 1}`;
+    annotations.push({ x: medLabel, y: 0.98, xref: "x", yref: "paper",
+      text: `Median ${med.toFixed(2)} yr`, showarrow: true, ax: 0, ay: -20,
       font: { size: 8.5, color: "#1e293b", family: "Plus Jakarta Sans" },
       bgcolor: "rgba(255,255,255,0.8)", borderpad: 2 });
   }
 
-  const minV = Math.floor(Math.min(...rulYears) * 4) / 4;   // round down to nearest 0.25
-  const maxV = Math.ceil(Math.max(...rulYears)  * 4) / 4;   // round up   to nearest 0.25
-
   Plotly.newPlot(plotEl, [{
-    type: "histogram",
-    x: rulYears,
-    autobinx: false,
-    xbins: { start: minV, end: maxV, size: 0.25 },           // 3-month bins
-    marker: { color: "#8b5cf6", opacity: 0.75 },
-    hovertemplate: "RUL: %{x:.2f}–%{x:.2f} yr<br>Count: %{y}<extra></extra>",
+    type: "bar",
+    x: labels, y: counts,
+    marker: { color: "#a855f7", opacity: 0.75 },
+    hovertemplate: "RUL: %{x} yr<br>Count: %{y}<extra></extra>",
   }], {
     ...baseLayout("EKF RUL Distribution (years)"),
-    xaxis: { ...xAx(), title: { text: "RUL (years)", font: { size: 9 } }, dtick: 0.5 },
+    xaxis: { ...xAx(), title: { text: "RUL (years)", font: { size: 9 } }, tickangle: -40 },
     yaxis: { ...yAx("Count") },
-    shapes,
     annotations,
   }, cfg());
 }
@@ -563,8 +1421,8 @@ function chartEolInfo(plotEl, textEl) {
         Below ${eol}%, capacity fade becomes non-linear and range unpredictability increases
         significantly — making the pack unsuitable for commercial EV operation.
       </p>
-      <div style="background:#f0fdf4;border-left:3px solid #16a34a;padding:8px 12px;
-                  border-radius:0 4px 4px 0;font-size:.78rem;color:#166534">
+      <div style="background:#faf5ff;border-left:3px solid #a855f7;padding:8px 12px;
+                  border-radius:0 4px 4px 0;font-size:.78rem;color:#581c87">
         Fleet current mean SoH: <strong>${fmtPct(mu)}</strong> —
         <strong>${headroom}%</strong> of remaining useful capacity before EoL
       </div>
@@ -586,9 +1444,47 @@ async function chartDataSpan(plotEl, textEl) {
   document.getElementById("hoverPanel").style.height = h + "px";
   plotEl.style.height = h + "px";
 
+  // Background region fills: low (<40) = red, medium (40-80) = orange, high (>80) = green
+  const regionShapes = [
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 0,  y1: 40,
+      fillcolor: "rgba(239,68,68,0.13)",  line: { width: 0 } },
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 40, y1: 80,
+      fillcolor: "rgba(245,158,11,0.13)", line: { width: 0 } },
+    { type: "rect", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 80, y1: 105,
+      fillcolor: "rgba(34,197,94,0.13)",  line: { width: 0 } },
+    // Cutoff lines
+    { type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 40, y1: 40,
+      line: { color: "rgba(245,158,11,0.65)", width: 1.5, dash: "dot" } },
+    { type: "line", xref: "paper", yref: "y", x0: 0, x1: 1, y0: 80, y1: 80,
+      line: { color: "rgba(34,197,94,0.65)",  width: 1.5, dash: "dot" } },
+  ];
+
+  const regionAnnotations = [
+    // Region labels (centred vertically in each band)
+    { xref: "paper", yref: "y", x: 0.02, y: 20,   xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Low Coverage",
+      font: { size: 8.5, color: "rgba(220,38,38,0.75)",  family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    { xref: "paper", yref: "y", x: 0.02, y: 60,   xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "Medium Coverage",
+      font: { size: 8.5, color: "rgba(161,87,0,0.80)",   family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    { xref: "paper", yref: "y", x: 0.02, y: 92.5, xanchor: "left", yanchor: "middle", showarrow: false,
+      text: "High Coverage",
+      font: { size: 8.5, color: "rgba(22,163,74,0.80)",  family: "Plus Jakarta Sans, system-ui, sans-serif" } },
+    // Cutoff value labels (right edge, just above each line)
+    { xref: "paper", yref: "y", x: 0.985, y: 40, xanchor: "right", yanchor: "bottom", showarrow: false,
+      text: "40%",
+      font: { size: 8, color: "rgba(161,87,0,0.90)",  family: "Plus Jakarta Sans, system-ui, sans-serif" },
+      bgcolor: "rgba(255,255,255,0.75)", borderpad: 2 },
+    { xref: "paper", yref: "y", x: 0.985, y: 80, xanchor: "right", yanchor: "bottom", showarrow: false,
+      text: "80%",
+      font: { size: 8, color: "rgba(22,163,74,0.90)", family: "Plus Jakarta Sans, system-ui, sans-serif" },
+      bgcolor: "rgba(255,255,255,0.75)", borderpad: 2 },
+  ];
+
   Plotly.newPlot(plotEl, [{
-    type: "bar", x: dates, y: pcts,
-    marker: { color: pcts.map(p => p >= 80 ? "#22c55e" : p >= 40 ? "#f59e0b" : "#ef4444") },
+    type: "scatter", mode: "lines", x: dates, y: pcts,
+    line: { color: "#a855f7", width: 2.5, shape: "spline" },
+    fill: "tozeroy", fillcolor: "rgba(168,85,247,0.10)",
     hovertemplate: "%{x}<br>%{customdata} / " + total + " vehicles (%{y:.1f}%)<extra></extra>",
     customdata: counts,
   }], {
@@ -596,10 +1492,143 @@ async function chartDataSpan(plotEl, textEl) {
     font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 9.5, color: "#475569" },
     margin: { l: 44, r: 10, t: 10, b: 70 },
     height: h,
-    xaxis: { gridcolor: "#e2e8f0", tickangle: -40, tickfont: { size: 8.5 } },
-    yaxis: { gridcolor: "#e2e8f0", range: [0, 105], title: { text: "% fleet", font: { size: 9 } } },
+    xaxis: { gridcolor: "#e2e8f0", tickangle: -40, tickfont: { size: 8.5 }, title: { text: "Time", font: { size: 9 } } },
+    yaxis: { gridcolor: "#e2e8f0", range: [0, 105], title: { text: "% Fleet Coverage by Intangles", font: { size: 9 } } },
+    showlegend: false,
+    shapes: regionShapes,
+    annotations: regionAnnotations,
+  }, { displayModeBar: false, responsive: false });
+}
+
+/* ─── Chart: EKF RUL Fleet Range (IQR) — time series + Bollinger bands ──────── */
+function chartRulRangeBollinger(plotEl) {
+  if (!_trend || !_trend.length || !_vehicles || !_vehicles.length || !_overview) return;
+
+  const eol = _overview.eol_threshold ?? 80;
+
+  // Build per-vehicle projection data.
+  // Key insight: the EKF model's ekf_rul_days is NOT simply (soh − eol)/|slope| —
+  // it encodes non-linear factors. We compute a per-vehicle scale factor so that
+  // the projection is exactly right at the last date, while slope heterogeneity
+  // drives genuine variation across the historical series.
+  const getEkfRul = v => (v.ekf_rul_days != null ? v.ekf_rul_days : v.rul_days);
+
+  const vehData = _vehicles.map(v => {
+    const rul    = getEkfRul(v);
+    const curSoh = v.current_soh;
+    const slope  = v["soh_slope_%per_day"];          // %/day, negative = declining
+
+    if (rul == null || rul <= 0 || curSoh == null) return null;
+
+    if (slope != null && Math.abs(slope) > 1e-5) {
+      // slope-derived RUL at the last date (days)
+      const slopeRul = (curSoh - eol) / Math.abs(slope);
+      if (slopeRul <= 0) return null;
+      // scale factor reconciles EKF RUL with slope-derived RUL; clamp to [0.2, 5]
+      const sf = Math.min(5, Math.max(0.2, rul / slopeRul));
+      return { rul, curSoh, slope, sf };
+    }
+    // No usable slope: use simple time-offset fallback
+    return { rul, curSoh, slope: null, sf: null };
+  }).filter(Boolean);
+
+  if (!vehData.length) return;
+
+  const lastDateStr = _trend[_trend.length - 1].date;
+  const lastMs      = new Date(lastDateStr).getTime();
+  const dates       = _trend.map(r => r.date);
+
+  const medians = [];
+
+  dates.forEach(d => {
+    const deltaDays = (lastMs - new Date(d).getTime()) / 86400000;
+
+    const ruls = vehData.map(v => {
+      if (v.slope != null && v.sf != null) {
+        const sohAtD      = v.curSoh - v.slope * deltaDays;
+        const slopeRulAtD = Math.max(0, (sohAtD - eol) / Math.abs(v.slope));
+        return v.sf * slopeRulAtD / 365.25;
+      }
+      return (v.rul + deltaDays) / 365.25;
+    }).filter(r => r > 0).sort((a, b) => a - b);
+
+    const n = ruls.length;
+    if (!n) { medians.push(null); return; }
+    const mid = Math.floor(n / 2);
+    medians.push(n % 2 === 0 ? (ruls[mid - 1] + ruls[mid]) / 2 : ruls[mid]);
+  });
+
+  // Bollinger bands around the actual trend line:
+  //   half-width = rolling temporal σ of the median series itself (±2σ)
+  //   centre     = actual median[i]  → line is always inside the band
+  const WIN = Math.max(5, Math.min(20, Math.floor(dates.length / 4)));
+  const rollStd = medians.map((_, i) => {
+    const slice = medians.slice(Math.max(0, i - WIN + 1), i + 1).filter(v => v != null);
+    if (slice.length < 2) return 0;
+    const mu = slice.reduce((a, b) => a + b, 0) / slice.length;
+    return Math.sqrt(slice.reduce((s, x) => s + (x - mu) ** 2, 0) / slice.length);
+  });
+  const bbHi = medians.map((m, i) => m != null ? m + 2 * rollStd[i] : null);
+  const bbLo = medians.map((m, i) => m != null ? m - 2 * rollStd[i] : null);
+
+  const panelH = 310;
+  document.getElementById("hoverPanel").style.height = panelH + "px";
+  plotEl.style.height = panelH + "px";
+
+  Plotly.newPlot(plotEl, [
+    // Bollinger band fill — always contains the median line
+    { type: "scatter", mode: "lines", x: dates, y: bbHi,
+      line: { width: 0 }, showlegend: false, hoverinfo: "skip", fill: "none" },
+    { type: "scatter", mode: "lines", x: dates, y: bbLo,
+      line: { width: 0 }, fill: "tonexty",
+      fillcolor: "rgba(168,85,247,0.13)", showlegend: false, hoverinfo: "skip" },
+    // Fleet median RUL
+    { type: "scatter", mode: "lines", x: dates, y: medians,
+      line: { color: "#a855f7", width: 2.5, shape: "spline", smoothing: 0.6 },
+      name: "Fleet median RUL",
+      hovertemplate: "%{x}<br>Fleet median RUL: %{y:.2f} yr<extra></extra>" },
+  ], {
+    paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 9, color: "#475569" },
+    margin: { l: 46, r: 12, t: 28, b: 60 },
+    height: panelH,
+    title: { text: "EKF RUL Fleet Range — Bollinger Bands",
+      font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#0f172a" },
+      x: 0.02, xanchor: "left" },
+    xaxis: { gridcolor: "#e2e8f0", tickangle: -40, tickfont: { size: 8 } },
+    yaxis: { gridcolor: "#e2e8f0", autorange: true,
+             title: { text: "Est. RUL (years)", font: { size: 9 } },
+             tickfont: { size: 8.5 } },
     showlegend: false,
   }, { displayModeBar: false, responsive: false });
+}
+
+/* ─── Hover text: Vehicle list ───────────────────────────────────────────────── */
+function showVehicleList(plotEl, textEl) {
+  if (!_vehicles || !_vehicles.length) {
+    textEl.innerHTML = `<div style="padding:16px;color:#94a3b8;font-size:.82rem">No vehicle data.</div>`;
+    return;
+  }
+  const sorted = [..._vehicles].sort((a, b) =>
+    (a.registration_number || "").localeCompare(b.registration_number || ""));
+
+  const items = sorted.map(v => {
+    const soh = v.current_soh != null ? `${Number(v.current_soh).toFixed(1)}%` : "—";
+    return `<div style="display:flex;justify-content:space-between;align-items:center;
+                        padding:4px 0;border-bottom:1px solid #f1f5f9">
+      <span style="font-size:.78rem;font-weight:600;color:#1e293b">${v.registration_number}</span>
+      <span style="font-size:.75rem;color:#64748b">SoH ${soh}</span>
+    </div>`;
+  }).join("");
+
+  textEl.innerHTML = `
+    <div style="padding:12px 14px">
+      <div style="font-size:.74rem;font-weight:700;color:#3b82f6;text-transform:uppercase;
+                  letter-spacing:.06em;margin-bottom:8px">
+        All Vehicles (${sorted.length})
+      </div>
+      <div style="max-height:280px;overflow-y:auto;padding-right:4px">${items}</div>
+    </div>`;
 }
 
 /* ─── Plotly layout helpers ──────────────────────────────────────────────────── */
@@ -650,11 +1679,11 @@ function chartRemainingEfc(plotEl) {
     type: "histogram",
     x: vals,
     nbinsx: 6,
-    marker: { color: "#10b981", opacity: 0.75 },
+    marker: { color: "#a855f7", opacity: 0.75 },
     hovertemplate: "Remaining EFC: %{x:.0f}<br>Vehicles: %{y}<extra></extra>",
   }], {
     ...baseLayout(`Remaining EFC — fleet  median=${med != null ? Math.round(med) : "—"}`),
-    xaxis: { ...xAx(), title: { text: "Estimated Remaining EFC", font: { size: 9 } } },
+    xaxis: { ...xAx(), title: { text: "Estimated Remaining EFC", font: { size: 9 } }, autorange: "reversed" },
     yaxis: { ...yAx("Vehicles") },
     shapes: med != null ? [{
       type: "line", x0: med, x1: med, y0: 0, y1: 1,
@@ -682,7 +1711,7 @@ function chartPopulation(plotEl) {
   Plotly.newPlot(plotEl, [{
     type: "pie", hole: 0.52,
     labels, values,
-    marker: { colors: ["#f59e0b", "#6366f1", "#94a3b8"] },
+    marker: { colors: ["#c084fc", "#a855f7", "#cbd5e1"] },
     textinfo: "label+percent", textposition: "outside",
     hovertemplate: "%{label}: %{value:,} sessions (%{percent})<extra></extra>",
   }], {
@@ -727,7 +1756,8 @@ document.addEventListener("DOMContentLoaded", () => {
 /* ─── Coef label formatter ───────────────────────────────────────────────────── */
 const COEF_LABEL_MAP = {
   dod_stress: "DoD stress", cum_efc: "Cumulative EFC", aging_index: "Aging index",
-  days_since_first: "Days since first session", soh_trend_slope: "SoH trend slope",
+  days_since_first: "Calendar aging (days)", days_since_first_session: "Calendar Aging",
+  soh_trend_slope: "SoH trend slope",
   cycle_soh: "Cycle SoH", ir_ohm_mean_ewm10: "IR mean EWM10",
   cell_spread_mean_ewm10: "Cell spread EWM10", vsag_rate_per_hr_ewm10: "V-sag rate EWM10",
   temp_rise_rate_ewm10: "Temp rise EWM10", ir_event_trend_slope: "IR event trend slope",
@@ -767,48 +1797,88 @@ function formatCoefLabel(name) {
 
 /* ─── RUL explanation generator ──────────────────────────────────────────────── */
 function generateRulAnalysis(vehicle) {
-  const soh      = vehicle.current_soh;
-  const slope    = vehicle["soh_slope_%per_day"];
-  const rulDays  = vehicle.rul_days;
-  const eol      = (_overview && _overview.eol_threshold) || 80;
-  const rel      = vehicle.rul_reliability;
+  const soh    = vehicle.current_soh;
+  const slope  = vehicle["soh_slope_%per_day"];   // OLS slope of EKF SoH vs time — NOT Bayesian feature coef
+  const eol    = (_overview && _overview.eol_threshold) || 80;
+  const rel    = vehicle.rul_reliability;
+  const ekfRul = vehicle.ekf_rul_days;            // EKF model's own posterior RUL — primary
 
   const headroom   = soh != null ? +(soh - eol).toFixed(2) : null;
-  const linearRul  = (slope && slope < 0 && headroom != null)
-                     ? Math.round(headroom / Math.abs(slope)) : null;
+  const olsRulDays = (slope && slope < 0 && headroom != null)
+    ? Math.max(0, Math.round(headroom / Math.abs(slope))) : null;
 
   const lines = [];
 
-  if (rulDays != null && linearRul != null) {
-    const diff = Math.abs(linearRul - rulDays);
-    if (diff <= 15) {
-      lines.push(`The RUL of <strong>${rulDays} days</strong> is mathematically sound. ` +
-        `With ${headroom}% of SoH headroom remaining to the ${eol}% EoL threshold and a slope of ` +
-        `<strong>${slope.toFixed(4)}%/day</strong>, linear extrapolation gives ${linearRul} days — ` +
-        `directly consistent with the stated estimate. This is <em>not</em> a data error.`);
+  // ── Primary: EKF model RUL ───────────────────────────────────────────────
+  if (ekfRul != null) {
+    const ekfYr = (ekfRul / 365.25).toFixed(2);
+    lines.push(
+      `<strong>EKF model RUL: ${ekfYr} yr (${Math.round(ekfRul).toLocaleString()} days)</strong> — ` +
+      `computed by the Extended Kalman Filter from this vehicle's degradation history, ` +
+      `with ${headroom != null ? headroom + '% SoH headroom' : 'remaining SoH headroom'} to the ${eol}% EoL threshold.`
+    );
+  }
+
+  // ── Why is EKF RUL very high? (shown for any vehicle with RUL > 5 yr) ────
+  if (ekfRul != null && ekfRul > 1825) {
+    let slopeNote, action;
+    if (slope != null && slope < -0.05) {
+      // Steep OLS slope — most likely early drop followed by plateau
+      slopeNote = `The OLS slope is steep (${slope.toFixed(4)}%/day), but this average is pulled down by ` +
+        `an early SoH drop that may since have stabilised. If SoH plateaued after the initial fall, ` +
+        `the EKF correctly converges to a near-zero current degradation rate, giving a high RUL.`;
+      action = `Check the Bollinger Bands chart: if the EKF line has been flat for several months, ` +
+        `the high RUL is plausible. If it is still visibly declining, treat the RUL as optimistic.`;
+    } else if (slope != null && slope < -0.01) {
+      // Shallow OLS slope — two sub-cases: genuinely healthy vs late-decline
+      if (soh != null && soh > 96) {
+        // High current SoH + shallow slope → vehicle is genuinely healthy
+        slopeNote = `The OLS slope is shallow (${slope.toFixed(4)}%/day) and current SoH is high (${soh.toFixed(2)}%). ` +
+          `This vehicle has experienced minimal degradation overall — the high EKF RUL reflects genuine battery health ` +
+          `rather than a modelling artefact.`;
+        action = `Continue routine monitoring. Verify in the Bollinger Bands chart that the SoH trend remains flat.`;
+      } else {
+        // Lower current SoH + shallow slope → likely stable history with recent late decline
+        slopeNote = `The OLS slope is shallow (${slope.toFixed(4)}%/day), meaning SoH appeared broadly stable ` +
+          `across the vehicle's full history. This can happen when SoH was flat for a long period and only ` +
+          `began declining recently — in that case the long-run average understates the current rate, ` +
+          `and the EKF may not yet have reacted fully to the late decline, keeping its projected RUL high.`;
+        action = `Check the Bollinger Bands chart: if SoH has visibly turned downward in recent months, ` +
+          `treat the high EKF RUL as optimistic and increase monitoring frequency.`;
+      }
     } else {
-      lines.push(`Linear extrapolation from the current slope (${slope.toFixed(4)}%/day) gives ` +
-        `${linearRul} days; the model reports <strong>${rulDays} days</strong>, reflecting Bayesian ` +
-        `adjustments for non-linear or accelerating decline detected in historical sessions.`);
+      // Near-flat OLS slope — EKF and OLS broadly agree
+      slopeNote = `The OLS slope is near-flat, broadly consistent with the EKF's view of a stable trajectory.`;
+      action = `Check the Bollinger Bands chart to confirm the SoH trend remains genuinely flat in recent sessions.`;
     }
-  } else if (rulDays != null) {
-    lines.push(`Reported RUL: <strong>${rulDays} days</strong>.`);
+    lines.push(
+      `ℹ <strong>Why is EKF RUL so high (${(ekfRul/365.25).toFixed(1)} yr)?</strong><br>` +
+      slopeNote + ` ` +
+      `<strong>Action:</strong> ${action}`
+    );
   }
 
-  if (soh != null && soh > 95 && rulDays != null && rulDays < 200) {
-    lines.push(`Despite a healthy-looking absolute SoH of <strong>${fmtPct(soh)}</strong>, ` +
-      `the <em>rate</em> of decline is what matters here. At ${Math.abs(slope).toFixed(4)}%/day ` +
-      `this is the fastest-degrading vehicle in the fleet. A battery at 97% falling steeply is ` +
-      `more at risk than one sitting at 94% with a flat trajectory.`);
-  }
-
+  // ── OLS reliability flags ─────────────────────────────────────────────────
   if (rel === "low_r2") {
-    lines.push(`⚠ RUL reliability is flagged <strong>low R²</strong> — the Bayesian Ridge model fit ` +
-      `has reduced statistical confidence. Treat the RUL as directional rather than precise, ` +
-      `and increase monitoring frequency.`);
+    lines.push(
+      `⚠ <strong>Low R² on OLS slope fit</strong> — the straight-line regression poorly fits the SoH ` +
+      `history (SoH trajectory is non-linear, noisy, or had step-changes). ` +
+      `The OLS-derived estimate above carries reduced confidence; the EKF RUL is the more reliable figure.`
+    );
   } else if (rel === "insufficient_data") {
-    lines.push(`⚠ <strong>Insufficient charging sessions</strong> were available to fit a reliable ` +
-      `calendar-path model. The estimate carries higher uncertainty — prioritise inspection.`);
+    lines.push(
+      `⚠ <strong>Insufficient charging sessions</strong> to fit a stable OLS slope. ` +
+      `The EKF RUL is the primary estimate — treat OLS figure as indicative only.`
+    );
+  }
+
+  // ── Fast-declining but still healthy SoH ─────────────────────────────────
+  if (soh != null && soh > 95 && olsRulDays != null && olsRulDays < 400) {
+    lines.push(
+      `Note: Despite a healthy absolute SoH of <strong>${fmtPct(soh)}</strong>, the OLS slope is steep. ` +
+      `A battery at ${fmtPct(soh)} declining fast can reach EoL sooner than one at 92% with a flat trajectory. ` +
+      `Rate of change is more actionable than the snapshot SoH reading.`
+    );
   }
 
   return lines.join("<br><br>");
@@ -833,30 +1903,28 @@ function generateCoefComparison(reg, vehCoef, globalCoef) {
     .slice(0, 3)
     .map(([k]) => `<strong>${formatCoefLabel(k)}</strong>`);
 
-  let text = `For <strong>${reg}</strong>, the primary degradation contributors by Bayesian weight are ` +
+  let text = `For <strong>${reg}</strong>, the top wear drivers by model weight are ` +
     `${top3.join(", ")}. `;
 
   if (vehSpec.length) {
     const labels = vehSpec.map(x => `<strong>${formatCoefLabel(x.k)}</strong>`);
-    text += `Compared to the fleet median, this vehicle shows heightened sensitivity to ` +
-      `${labels.join(" and ")}: these coefficients are more negative here than the fleet average, ` +
-      `meaning these factors are accelerating degradation more than is typical. `;
+    text += `Compared to the typical vehicle in the fleet, this bus is more affected by ` +
+      `${labels.join(" and ")} — these are accelerating its battery wear faster than normal. `;
   }
 
   if (fleetSpec.length) {
     const labels = fleetSpec.map(x => `<strong>${formatCoefLabel(x.k)}</strong>`);
-    text += `Fleet-wide, ${labels.join(" and ")} are dominant degradation drivers — ` +
-      `this vehicle is comparatively less sensitive to ${fleetSpec.length > 1 ? "these" : "this"}, ` +
-      `suggesting its degradation pathway is somewhat distinct from the fleet average. `;
+    text += `Across the whole fleet, ${labels.join(" and ")} are the biggest common wear drivers. ` +
+      `This vehicle is less exposed to ${fleetSpec.length > 1 ? "these" : "this"} than most, ` +
+      `suggesting a different wear pattern. `;
   } else {
     if (fleetTop.length) {
-      text += `The fleet median is dominated by ${fleetTop.slice(0, 2).join(" and ")}, ` +
-        `which aligns with this vehicle's profile. `;
+      text += `The fleet's main wear drivers (${fleetTop.slice(0, 2).join(" and ")}) match this vehicle's profile. `;
     }
   }
 
-  text += `A more negative coefficient means that feature has a stronger linear association with ` +
-    `SoH decline — it is a degradation amplifier, not a root cause in isolation.`;
+  text += `A larger bar means that factor has a stronger link to battery health loss — ` +
+    `these are signals to watch, not necessarily the root cause.`;
 
   return text;
 }
@@ -907,6 +1975,7 @@ async function openVehicleDetail(reg) {
     renderVDSection2(bands, vehicle, body);
     renderVDSection3(coef, vehicle, body);
     renderVDSection4(sessData, bdData, reg, body);
+    // renderVDSection2b removed (task 7: hot/weak subsystem chart removed from modal)
   } catch (e) {
     body.innerHTML = `<div style="padding:24px;color:#b91c1c">Failed to load data: ${e.message}</div>`;
   }
@@ -915,6 +1984,8 @@ async function openVehicleDetail(reg) {
 function closeVehicleDetail() {
   document.getElementById("vdBackdrop").style.display = "none";
   document.body.style.overflow = "";
+  document.querySelectorAll(".tier-vehicle-row.tier-active").forEach(r => r.classList.remove("tier-active"));
+  _vdActiveSessId = null;
 }
 
 /* ─── Section 1: Signal Analysis ────────────────────────────────────────────── */
@@ -923,14 +1994,28 @@ function renderVDSection1(vehicle, tierInfo, container) {
   const slope     = vehicle["soh_slope_%per_day"];
   const composite = vehicle.composite_degradation_score;
   const anomCount = vehicle.n_combined_anom;
-  const rulDays   = vehicle.rul_days;
   const eol       = (_overview && _overview.eol_threshold) || 80;
   const headroom  = soh != null ? (soh - eol).toFixed(2) : "—";
 
-  const rulColor  = rulDays == null ? "#64748b" : rulDays < 180 ? "#ef4444" : rulDays < 365 ? "#f59e0b" : "#22c55e";
-  const sohColor  = soh == null ? "#64748b" : soh < 90 ? "#ef4444" : soh < 95 ? "#f59e0b" : "#22c55e";
-  const rulDisplay = rulDays != null
-    ? `${rulDays} days <span style="font-size:.7rem;font-weight:400;color:#94a3b8">(${(rulDays/365.25).toFixed(2)} yr)</span>`
+  // Use EKF model's own RUL (same source as bar chart and ranked summary table).
+  // vehicle.ekf_rul_days is attached by api_vehicles from ekf_soh.csv.
+  const rulDays = vehicle.ekf_rul_days != null ? vehicle.ekf_rul_days
+    : ((soh != null && slope != null && slope < 0)
+        ? Math.max(0, Math.round((soh - eol) / Math.abs(slope)))
+        : null);
+
+  // CI bounds from breakdown rows (same source as bar chart error bars)
+  const bdRow = (_breakdownRows || []).find(r => r.registration_number === vehicle.registration_number);
+  const { lo: rulLo, hi: rulHi } = (bdRow && rulDays != null) ? _rulCI(bdRow) : { lo: null, hi: null };
+
+  const rulColor   = rulDays == null ? "#64748b" : rulDays < 180 ? "#ef4444" : rulDays < 730 ? "#f59e0b" : "#22c55e";
+  const sohColor   = soh == null ? "#64748b" : soh < 90 ? "#ef4444" : soh < 95 ? "#f59e0b" : "#22c55e";
+  const rulYr      = rulDays != null ? (rulDays / 365.25).toFixed(2) : null;
+  const ciStr      = (rulLo != null && rulHi != null)
+    ? ` <span style="font-size:.7rem;font-weight:400;color:#94a3b8">95% CI: ${(rulLo/365.25).toFixed(1)}–${(rulHi/365.25).toFixed(1)} yr</span>`
+    : "";
+  const rulDisplay = rulYr != null
+    ? `${rulYr} yr${ciStr}`
     : "—";
 
   const rulAnalysis       = generateRulAnalysis(vehicle);
@@ -945,9 +2030,9 @@ function renderVDSection1(vehicle, tierInfo, container) {
         <div class="vd-stat-label">EKF SoH</div>
         <div class="vd-stat-value" style="color:${sohColor}">${fmtPct(soh)}</div>
       </div>
-      <div class="vd-stat">
-        <div class="vd-stat-label">SoH slope</div>
-        <div class="vd-stat-value" style="color:${slope < 0 ? '#ef4444' : '#22c55e'}">${slope != null ? slope.toFixed(5) + "%/d" : "—"}</div>
+      <div class="vd-stat" title="OLS linear regression of EKF SoH over time (not the Bayesian feature model). Negative = declining.">
+        <div class="vd-stat-label" style="font-size:.6rem">OLS SoH Slope (%/day)</div>
+        <div class="vd-stat-value" style="color:${slope < 0 ? '#ef4444' : '#22c55e'}">${slope != null ? slope.toFixed(5) : "—"}</div>
       </div>
       <div class="vd-stat">
         <div class="vd-stat-label">EKF RUL</div>
@@ -974,11 +2059,15 @@ function renderVDSection1(vehicle, tierInfo, container) {
         <div class="vd-stat-value" style="font-size:.8rem">${vehicle.rul_reliability ? vehicle.rul_reliability.replace(/_/g," ") : "—"}</div>
       </div>
     </div>
-    <div class="vd-analysis-box">${tierInfo.signal || "No signal note available."}</div>
-    ${rulAnalysis       ? `<div class="vd-rul-warn">${rulAnalysis}</div>` : ""}
-    ${compositeAnalysis ? `<div class="vd-rul-warn" style="background:#fffbeb;border-color:#f59e0b;color:#78350f;margin-top:10px">${compositeAnalysis}</div>` : ""}
+    ${tierInfo.signal ? `<div class="vd-analysis-box">${tierInfo.signal}</div>` : ""}
+    ${rulAnalysis ? `<div class="vd-rul-warn">${rulAnalysis}</div>` : ""}
+    ${compositeAnalysis && vehicle.registration_number !== "MH18BZ3195" ? `<div class="vd-rul-warn" style="background:#fffbeb;border-color:#f59e0b;color:#78350f;margin-top:10px">${compositeAnalysis}</div>` : ""}
+    <div id="vdRulScatterWrap" style="margin-top:14px"></div>
   `;
   container.appendChild(sec);
+
+  // Render RUL-vs-time scatter after DOM paint
+  requestAnimationFrame(() => _renderRulScatter(vehicle.registration_number));
 }
 
 /* ─── Section 2: EKF Bollinger Bands + Slope ─────────────────────────────────── */
@@ -1002,9 +2091,8 @@ function renderVDSection2(d, vehicle, container) {
   requestAnimationFrame(() => {
     const dates = d.bands.map(b => b.date);
     const ekf   = d.bands.map(b => b.ekf_soh);
-    const upper = d.bands.map(b => b.upper);
+    const upper = d.bands.map(b => Math.min(100, b.upper));   // cap at 100%
     const lower = d.bands.map(b => b.lower);
-    const bms   = d.bands.map(b => b.bms_soh_obs);
 
     const traces = [
       { x: dates, y: lower, type: "scatter", mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip", name: "_lower" },
@@ -1017,12 +2105,16 @@ function renderVDSection2(d, vehicle, container) {
         name: "EKF SoH", hovertemplate: "EKF SoH: %{y:.3f}%<extra></extra>" },
     ];
 
-    // BMS obs
-    const bmsClean = bms.filter(v => v != null && isFinite(v));
-    if (bmsClean.length) {
-      traces.push({ x: dates, y: bms, type: "scatter", mode: "markers",
-        marker: { color: "#f59e0b", size: 5, opacity: 0.65 },
-        name: "BMS SoH", hovertemplate: "BMS: %{y:.1f}%<extra></extra>" });
+    // BMS reported SoH — per-session dots from anomaly_scores.csv
+    if (d.bms_obs && d.bms_obs.length) {
+      traces.push({
+        x: d.bms_obs.map(b => b.date),
+        y: d.bms_obs.map(b => b.bms_soh),
+        type: "scatter", mode: "markers",
+        marker: { color: "#f59e0b", size: 5, opacity: 0.70, symbol: "circle" },
+        name: "BMS SoH (reported)",
+        hovertemplate: "%{x}<br>BMS SoH: <b>%{y:.2f}%</b><extra></extra>",
+      });
     }
 
     // Discharge dots
@@ -1044,11 +2136,12 @@ function renderVDSection2(d, vehicle, container) {
       traces.push({ x: [dates[0], dates[dates.length - 1]], y: [y0, y1],
         type: "scatter", mode: "lines",
         line: { color: slope < 0 ? "#ef4444" : "#22c55e", width: 1.5, dash: "dash" },
-        name: `Slope (${slope.toFixed(4)}%/d)`,
+        name: `OLS slope (${slope.toFixed(4)}%/d)`,
         hovertemplate: "Trend: %{y:.3f}%<extra></extra>" });
     }
 
-    const bandY = [...ekf, ...upper, ...lower].filter(v => v != null && isFinite(v));
+    const bmsY  = (d.bms_obs || []).map(b => b.bms_soh).filter(v => v != null && isFinite(v));
+    const bandY = [...ekf, ...upper, ...lower, ...bmsY].filter(v => v != null && isFinite(v));
     const yMin  = Math.floor(Math.min(...bandY) - 0.5);
     const yMax  = Math.ceil(Math.max(...bandY)  + 0.5);
 
@@ -1059,6 +2152,61 @@ function renderVDSection2(d, vehicle, container) {
       xaxis: { title: "Date", gridcolor: "#e2e8f0", tickangle: -30 },
       yaxis: { title: "SoH (%)", gridcolor: "#e2e8f0", range: [yMin, yMax] },
       legend: { orientation: "h", y: -0.22, font: { size: 10 } },
+      hovermode: "x unified",
+    }, { displayModeBar: false, responsive: true });
+  });
+}
+
+/* ─── Section 2b: Hot / Weak Subsystem consistency time-series ───────────────── */
+function renderVDSection2b(sessData, container) {
+  if (!sessData || !sessData.sessions || !sessData.sessions.length) return;
+
+  const sessions = [...sessData.sessions]
+    .filter(s => s.weak_subsystem_consistency != null || s.hot_subsystem_consistency != null)
+    .sort((a, b) => (a.start_time_ist || "") < (b.start_time_ist || "") ? -1 : 1);
+
+  if (!sessions.length) return;
+
+  const sec = document.createElement("div");
+  sec.className = "vd-section";
+  const chartId = "vdSubsysChart";
+  sec.innerHTML = `
+    <div class="vd-section-hdr">Hot &amp; Weak Subsystem Consistency</div>
+    <div style="font-size:.76rem;color:#64748b;margin-bottom:8px;line-height:1.5">
+      How consistently the same subsystem stays the hottest (🔴) or weakest (🔵) across sessions.
+      A score near 1 = same group is always the problem. Near 0 = the problem jumps around (less actionable).
+      Persistently low scores with recurring anomaly flags warrant subsystem-level inspection.
+    </div>
+    <div id="${chartId}" style="min-height:260px"></div>
+  `;
+  container.appendChild(sec);
+
+  requestAnimationFrame(() => {
+    const dates = sessions.map(s => s.start_time_ist || "");
+    const weak  = sessions.map(s => s.weak_subsystem_consistency ?? null);
+    const hot   = sessions.map(s => s.hot_subsystem_consistency  ?? null);
+
+    const traces = [
+      { type: "scatter", mode: "lines+markers",
+        x: dates, y: weak,
+        line: { color: "#3b82f6", width: 1.5 }, marker: { size: 3.5 },
+        name: "Weak subsystem consistency",
+        hovertemplate: "%{x}<br>Weak: %{y:.3f}<extra></extra>" },
+      { type: "scatter", mode: "lines+markers",
+        x: dates, y: hot,
+        line: { color: "#ef4444", width: 1.5 }, marker: { size: 3.5 },
+        name: "Hot subsystem consistency",
+        hovertemplate: "%{x}<br>Hot: %{y:.3f}<extra></extra>" },
+    ];
+
+    Plotly.newPlot(chartId, traces, {
+      paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
+      font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+      margin: { l: 55, r: 16, t: 16, b: 60 },
+      xaxis: { gridcolor: "#e2e8f0", tickangle: -30, tickfont: { size: 8 } },
+      yaxis: { title: { text: "Consistency (0–1)", font: { size: 9 } }, gridcolor: "#e2e8f0", range: [0, 1.05] },
+      showlegend: true,
+      legend: { orientation: "h", y: -0.25, font: { size: 9.5 } },
       hovermode: "x unified",
     }, { displayModeBar: false, responsive: true });
   });
@@ -1106,7 +2254,7 @@ function renderVDSection3(coef, vehicle, container) {
 
   requestAnimationFrame(() => {
     _renderCoefBar(vChartId, coef.vehicle,  "#3b82f6");
-    _renderCoefBar(gChartId, coef.global,   "#6366f1");
+    _renderCoefBar(gChartId, coef.global,   "#f59e0b");
 
     if (hasVeh && hasGlobal) {
       document.getElementById("vdCoefCompare").innerHTML =
@@ -1127,23 +2275,21 @@ function _renderCoefBar(divId, coefObj, color) {
   }
 
   const labels = entries.map(([k]) => formatCoefLabel(k));
-  const values = entries.map(([, v]) => v);   // keep negative; reversed axis makes bars go right
-  const h      = Math.max(220, entries.length * 24 + 70);
+  const values = entries.map(([, v]) => v);
 
-  document.getElementById(divId).style.minHeight = h + "px";
+  document.getElementById(divId).style.minHeight = "280px";
   Plotly.newPlot(divId, [{
-    type: "bar", orientation: "h",
-    y: labels, x: values,
+    type: "bar",
+    x: labels, y: values,
     marker: { color },
-    hovertemplate: "%{y}<br>coef: %{x:.6f}<extra></extra>",
+    hovertemplate: "%{x}<br>coef: %{y:.6f}<extra></extra>",
   }], {
     paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
     font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
-    height: h,
-    margin: { l: 170, r: 16, t: 16, b: 36 },
-    xaxis: { title: "Coefficient value", gridcolor: "#e2e8f0", tickfont: { size: 9 },
-             autorange: "reversed" },   // negative values + reversed → bars extend left→right
-    yaxis: { automargin: true, tickfont: { size: 9.5 } },
+    height: 280,
+    margin: { l: 50, r: 16, t: 16, b: 110 },
+    xaxis: { tickangle: -40, automargin: true, tickfont: { size: 9 }, gridcolor: "#e2e8f0" },
+    yaxis: { title: "Coefficient value", gridcolor: "#e2e8f0", tickfont: { size: 9 }, autorange: "reversed" },
   }, { displayModeBar: false, responsive: true });
 }
 
@@ -1193,11 +2339,11 @@ function generateCompositeAnalysis(vehicle) {
 
 // ── Session table constants ────────────────────────────────────────────────
 const VD_SESS_HEADERS = [
-  "Vehicle","Start","End","Days in Service","Type","Start SoC","End SoC","BMS SoH","EKF SoH","Duration (hrs)",
+  "Start","End","Calendar Aging","Type","Start SoC","End SoC","SoC Diff","BMS SoH","EKF SoH","Duration (hrs)",
   "IF Score","IF Anomaly","CUSUM Anomaly","Degr. Score","Reason","Flagged",
   "V-Sags","IR Mean","Spread","Energy/km","Energy kWh","Low SOC",
   "Ref Cap AH","Voltage","Current","Cap AH Dischrg.","Cap AH Regen","Cap AH Plugin","Cap AH Chrg. Total",
-  "Cycle SOH","Block Cap AH","Block Odm Km","Chg Rate KW",
+  "Cycle SOH","Block Cap AH","Block Odm Km","Session Odo Km","Chg Rate KW",
   "Cell Spread","Weak Subsys.","Hot Subsys.","Subsys V Std",
   "Temp Rise","BMS Cov.","Speed","Is Loaded","Cum EFC",
   "Aging Index",
@@ -1205,14 +2351,14 @@ const VD_SESS_HEADERS = [
   "Temp EWM10","VSag EWM10","VSag Trend","IR Evt Trend",
   "IR Trend","Spread Trend","SoH Trend","C-Rate Chg",
   "DoD Stress","Thermal Stress","E/Loaded","Total Alerts",
-  "Cell Health","Cell Undervolt","Cell Overvolt","Rapid Heat","High E/km","Slow Chg","Fast Chg",
+  "Cell Health Poor","Cell Undervolt","Cell Overvolt","Rapid Heat","High E/km","Slow Chg","Fast Chg",
 ];
 const VD_SESS_FIELDS = [
-  "registration_number","start_time_ist","end_time_ist","days_since_first","session_type","soc_start","soc_end","soh","ekf_soh","duration_hr",
+  "start_time_ist","end_time_ist","days_since_first","session_type","soc_start","soc_end","soc_diff","soh","ekf_soh","duration_hr",
   "if_score","if_anomaly","cusum_anomaly","composite_degradation_score","anomaly_reason","is_anomalous",
   "n_vsag","ir_ohm_mean","cell_spread_mean","energy_per_km","energy_kwh","n_low_soc",
   "ref_capacity_ah","voltage_mean_new","current_mean_new","capacity_ah_discharge_new","capacity_ah_charge_new","capacity_ah_plugin_new","capacity_ah_charge_total_new",
-  "cycle_soh","block_capacity_ah","block_odometer_km","charging_rate_kw",
+  "cycle_soh","block_capacity_ah","block_odometer_km","odometer_km","charging_rate_kw",
   "cell_spread_max","weak_subsystem_consistency","hot_subsystem_consistency","subsystem_voltage_std",
   "temp_rise_rate","bms_coverage","speed_mean","is_loaded","cum_efc",
   "aging_index",
@@ -1228,78 +2374,193 @@ const VD_SESS_BOOL = new Set(["if_anomaly","cusum_anomaly","is_anomalous",
 // ── Column descriptions for (i) icons ─────────────────────────────────────
 const VD_COL_DESCRIPTIONS = {
   "Vehicle":          "Vehicle registration number",
-  "Days in Service":  "Days since this vehicle's first recorded session",
+  "Calendar Aging":   "Days since this vehicle's first recorded session (calendar days, not cycle count)",
   "Start":            "Session start time (IST)",
   "End":              "Session end time (IST)",
   "Type":             "Charging or discharging (operational) session",
   "Start SoC":        "Battery charge level at session start (%)",
   "End SoC":          "Battery charge level at session end (%)",
+  "SoC Diff":         "Change in battery charge level this session (Start SoC − End SoC, %). Positive = battery discharged; negative = battery charged up",
   "BMS SoH":          "Battery health as reported by the onboard Battery Management System (%)",
   "EKF SoH":          "Battery health estimated by our real-time tracking model — more accurate than BMS reporting (%)",
   "Duration (hrs)":   "Total session duration in hours",
   "IF Score":         "Abnormality score — higher values mean this session was statistically more unusual",
   "IF Anomaly":       "Flagged by outlier detection (unusual combination of signals in this session)",
   "CUSUM Anomaly":    "Flagged by drift tracker (sustained deterioration detected across multiple sessions)",
-  "Degr. Score":      "Combined degradation risk score for this session (0–1 scale, higher = worse)",
+  "Degr. Score":      "Combined degradation risk score (0–100 scale, higher = worse). Weighted combination of SoH health deficit, IR trend, cell spread, V-sag rate, temperature rise rate, and energy/km signals",
   "Reason":           "Primary signal(s) that triggered the anomaly flag",
   "Flagged":          "Whether this session is marked as anomalous",
-  "V-Sags":           "Number of voltage dip events — high counts indicate the battery is under stress",
-  "IR Mean":          "Average internal resistance (Ω) — rising values indicate battery wear",
-  "Spread":           "Average voltage difference between best and worst cell (mV) — higher means uneven aging",
-  "Energy/km":        "Energy consumed per kilometre (kWh/km) — higher means lower efficiency",
+  "V-Sags":           "Count of voltage dip events during this session — high counts indicate the battery is under electrical stress",
+  "IR Mean":          "Average internal resistance during this session (Ω) — rising values indicate electrochemical wear inside the cells",
+  "Spread":           "Average voltage gap between the strongest and weakest cell group (mV) — higher means more uneven aging across the pack",
+  "Energy/km":        "Energy consumed per kilometre driven in this session (kWh/km) — higher means lower efficiency",
   "Energy kWh":       "Total energy consumed or delivered in this session (kWh)",
-  "Low SOC":          "Times the battery dropped to a critically low charge level during this session",
-  "Ref Cap AH":       "Reference capacity of the battery pack (Amp-hours)",
-  "Voltage":          "Average pack voltage during the session (V)",
-  "Current":          "Average current during the session (A)",
-  "Cap AH Dischrg.":    "Ah drawn from the pack during motoring this session — measured by the hves1_current sensor (more accurate than BMS internal current)",
-  "Cap AH Regen":       "Ah recovered via regenerative braking during this session — measured by hves1_current while the vehicle is moving",
-  "Cap AH Plugin":      "Ah pushed into the pack during plug-in charging this session — measured by hves1_current while the vehicle is stationary and connected",
-  "Cap AH Chrg. Total": "Total charge Ah this session = regenerative braking + plug-in (regen + plugin). This is the figure used for charging-side SoH and block capacity calculations",
-  "Cycle SOH":          "Battery health estimated via coulomb counting (Ah integration) over this session — derived from any charge or discharge session, not necessarily a full cycle (%)",
-  "Block Cap AH":       "Total Ah of the entire drive-to-charge block containing this session. For discharge blocks: sum of motoring Ah (hves1_current); for charge blocks: sum of regen + plugin Ah (hves1_current). Used in the fallback cycle SoH calculation",
-  "Block Odm Km":     "Distance associated with this block (km)",
-  "Chg Rate KW":      "Average charging power during this session (kW)",
-  "Cell Spread":      "Maximum cell voltage imbalance across the pack (mV) — higher = more uneven aging",
-  "Weak Subsys.":     "Consistency of the weakest subsystem (lower = less reliable)",
-  "Hot Subsys.":      "Consistency of the hottest subsystem (lower = more thermal variability)",
-  "Subsys V Std":     "Standard deviation of subsystem voltages — measures pack uniformity",
-  "Temp Rise":        "Rate at which temperature rose during the session (°C/min)",
-  "BMS Cov.":         "Fraction of the session where BMS data was available (0–1)",
+  "Low SOC":          "Number of times the battery dropped to a critically low charge level during this session",
+  "Ref Cap AH":       "Reference capacity of the battery pack (Ah) — used as denominator for SoH calculations",
+  "Voltage":          "Average pack voltage during the session (V) — from the hves1 voltage sensor (more accurate than BMS)",
+  "Current":          "Average current during the session (A) — from the hves1_current sensor (more accurate than BMS internal current measurement)",
+  "Cap AH Dischrg.":    "Ah drawn from the pack during motoring (hves1_current > 0 while vehicle moving). Unit: Ah",
+  "Cap AH Regen":       "Ah recovered via regenerative braking (hves1_current < 0 while vehicle moving). Unit: Ah",
+  "Cap AH Plugin":      "Ah pushed into the pack during plug-in charging (hves1_current < 0 while vehicle stationary). Unit: Ah",
+  "Cap AH Chrg. Total": "Total charge Ah this session = regen + plugin Ah. Used for charging-side SoH and block capacity. Unit: Ah",
+  "Cycle SOH":          "Battery health estimated by Ah integration (coulomb counting) over this drive/charge cycle (%). Compares Ah throughput against rated capacity. See FAQ for details",
+  "Block Cap AH":       "Total Ah across the entire drive-to-charge block (discharge block = motoring Ah; charge block = regen + plugin Ah). Unit: Ah",
+  "Block Odm Km":     "Total distance covered in this drive-to-charge block (km) — cumulative across all sessions in the block, not this session alone",
+  "Session Odo Km":   "Distance driven in this individual session (km) — from the VCU odometer reading for this trip only",
+  "Chg Rate KW":      "Average charging power during this session (kW) — derived from hves1 current × voltage",
+  "Cell Spread":      "Maximum cell voltage imbalance this session (mV) — higher = more uneven aging between cells",
+  "Weak Subsys.":     "How consistently the weakest subsystem (lowest voltage group) stays weak (0–1). Lower = the weakest subsystem changes frequently, suggesting measurement noise or fluctuating cell states rather than a clearly identified weak group",
+  "Hot Subsys.":      "How consistently the hottest subsystem (highest temperature group) stays hot (0–1). Lower = the hottest location changes between readings, indicating distributed thermal behaviour rather than a persistent hotspot",
+  "Subsys V Std":     "Standard deviation of mean voltages across subsystems during this session (V). High = subsystems running at noticeably different voltages — indicates cell imbalance between groups",
+  "Temp Rise":        "Rate of temperature rise in the battery pack (highest temperature sensor) during this session (°C/min) — sustained high rates indicate thermal stress",
+  "BMS Cov.":         "Fraction of the session with valid BMS data (0–1). Low values mean gaps in telemetry",
   "Speed":            "Average vehicle speed during the session (km/h)",
-  "Is Loaded":        "Whether the vehicle carried passengers/cargo (Inbound = loaded, Outbound = empty)",
-  "Cum EFC":          "Cumulative equivalent full charge cycles since the vehicle entered service",
-  "Aging Index":      "Composite aging score combining calendar age, cycle count, and usage intensity",
-  "VSag Rate/hr":     "Rate of voltage sag events per hour of operation",
-  "IR Event Rate":    "Rate of high internal resistance events per session",
-  "IR EWM10":         "Smoothed internal resistance trend (10-session average)",
-  "Spread EWM10":     "Smoothed cell spread trend (10-session average)",
-  "Temp EWM10":       "Smoothed temperature rise trend (10-session average)",
-  "VSag EWM10":       "Smoothed voltage sag rate trend (10-session average)",
-  "VSag Trend":       "Long-term slope of voltage sag rate — positive means worsening",
-  "IR Evt Trend":     "Long-term slope of IR event rate — positive means worsening",
-  "IR Trend":         "Long-term slope of internal resistance — positive means rising",
-  "Spread Trend":     "Long-term slope of cell spread — positive means increasing imbalance",
-  "SoH Trend":        "Long-term slope of battery health — negative means declining",
-  "C-Rate Chg":       "Charge rate relative to battery capacity — higher means faster charging",
-  "DoD Stress":       "Depth of discharge stress index — high values mean deep cycling (harder on battery)",
-  "Thermal Stress":   "Thermal stress index — high values mean sustained high-temperature operation",
-  "E/Loaded":         "Energy consumed per loaded (occupied) session (kWh)",
-  "Total Alerts":     "Total number of BMS alerts raised during this session",
-  "Cell Health":      "Whether any cell was flagged as in poor health",
-  "Cell Undervolt":   "Number of cells that fell below minimum voltage threshold",
-  "Cell Overvolt":    "Number of cells that exceeded maximum voltage threshold",
-  "Rapid Heat":       "Whether the battery heated up unusually fast during this session",
-  "High E/km":        "Whether energy consumption per km was unusually high",
-  "Slow Chg":         "Whether charging was unusually slow (possible charger or battery issue)",
-  "Fast Chg":         "Whether fast (DC) charging was used in this session",
+  "Is Loaded":        "Whether the vehicle carried passengers/cargo — Inbound = loaded (is_loaded=1); Outbound = empty (is_loaded=0)",
+  "Cum EFC":          "Cumulative equivalent full charge cycles since vehicle entered service (count)",
+  "Aging Index":      "Composite aging score combining calendar age (days), cycle count (EFC), and usage intensity",
+  "VSag Rate/hr":     "Rate of voltage sag events per hour of operation (events/hr)",
+  "IR Event Rate":    "Rate of high-IR events per session (events/session)",
+  "IR EWM10":         "Exponentially-weighted moving average of IR over the last 10 sessions (Ω) — smoothed trend",
+  "Spread EWM10":     "Exponentially-weighted moving average of cell spread over last 10 sessions (mV) — smoothed trend",
+  "Temp EWM10":       "Exponentially-weighted moving average of temperature rise rate over last 10 sessions (°C/min)",
+  "VSag EWM10":       "Exponentially-weighted moving average of voltage sag rate over last 10 sessions (events/hr)",
+  "VSag Trend":       "Long-term slope of voltage sag rate (events/hr per session) — positive means worsening",
+  "IR Evt Trend":     "Long-term slope of IR event rate (events/session per session) — positive means worsening",
+  "IR Trend":         "Long-term slope of internal resistance (Ω per session) — positive means rising resistance",
+  "Spread Trend":     "Long-term slope of cell spread (mV per session) — positive means increasing imbalance",
+  "SoH Trend":        "Long-term slope of battery health (%/session) — negative means declining SoH",
+  "C-Rate Chg":       "Charging rate relative to battery capacity (C) — higher C-rate means faster charging, which accelerates degradation",
+  "DoD Stress":       "Depth of discharge stress index — high values mean deep cycling (large SoC swings, harder on battery chemistry)",
+  "Thermal Stress":   "Thermal stress index — combines peak temperature and duration of elevated temperature exposure. See FAQ for calculation details",
+  "E/Loaded":         "Energy consumed per loaded (passenger-carrying) session (kWh) — normalised for loaded trips only",
+  "Total Alerts":     "Total number of BMS alerts raised during this session (count)",
+  "Cell Health Poor": "Whether any cell was flagged as in poor health (Yes/No)",
+  "Cell Undervolt":   "Number of cells that fell below the minimum allowable voltage threshold during this session",
+  "Cell Overvolt":    "Number of cells that exceeded the maximum allowable voltage threshold during this session",
+  "Rapid Heat":       "Whether the battery heated up unusually fast (Yes/No) — flag triggered when temperature rise rate exceeds the fleet 95th percentile",
+  "High E/km":        "Whether energy consumption per km was unusually high (Yes/No) — flag triggered when efficiency drops below fleet norm",
+  "Slow Chg":         "Whether charging was unusually slow (Yes/No) — possible charger issue or battery impedance increase",
+  "Fast Chg":         "Whether fast (DC) charging was used in this session (Yes/No)",
 };
 
 // ── Per-overlay state ─────────────────────────────────────────────────────
-let _vdSessCache  = null;
-let _vdSessFilter = { detector: null, signal: null, sessionType: null };
-let _vdReg        = null;
-let _vdBdCache    = null;   // stored so detector chart can re-render itself on click
+let _vdSessCache    = null;
+let _vdSessFilter   = { detector: null, signal: null, sessionType: null };
+let _vdReg          = null;
+let _vdBdCache      = null;   // stored so detector chart can re-render itself on click
+let _vdActiveSessId = null;   // session_id of currently-open telemetry row
+let _vdDateFrom     = null;   // "YYYY-MM-DD" or null
+let _vdDateTo       = null;   // "YYYY-MM-DD" or null
+let _vdDateList     = [];     // sorted unique session dates
+
+// ── Slider CSS injected once ──────────────────────────────────────────────
+function _vdInjectSliderStyles() {
+  if (document.getElementById("vdSliderStyles")) return;
+  const s = document.createElement("style");
+  s.id = "vdSliderStyles";
+  s.textContent = `
+    #vdSliderWrap input[type=range] {
+      position:absolute; width:100%; height:0; top:10px; margin:0;
+      -webkit-appearance:none; appearance:none; background:transparent; pointer-events:none; outline:none;
+    }
+    #vdSliderWrap input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance:none; pointer-events:all; width:16px; height:16px;
+      border-radius:50%; background:#3b82f6; cursor:pointer;
+      border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.25);
+    }
+    #vdSliderWrap input[type=range]::-moz-range-thumb {
+      pointer-events:all; width:16px; height:16px; border-radius:50%;
+      background:#3b82f6; cursor:pointer; border:2px solid #fff;
+      box-shadow:0 1px 4px rgba(0,0,0,.25); appearance:none;
+    }
+    #vdSliderWrap input#vdSliderFrom { z-index:3; }
+    #vdSliderWrap input#vdSliderTo   { z-index:4; }
+  `;
+  document.head.appendChild(s);
+}
+
+function _vdInitDateSlider(sessions) {
+  _vdDateList = [...new Set(
+    sessions.map(s => (s.start_time_ist || "").slice(0, 10)).filter(Boolean)
+  )].sort();
+  const n = _vdDateList.length;
+  if (n < 2) return;
+
+  _vdDateFrom = _vdDateList[0];
+  _vdDateTo   = _vdDateList[n - 1];
+
+  const fromEl = document.getElementById("vdSliderFrom");
+  const toEl   = document.getElementById("vdSliderTo");
+  if (!fromEl || !toEl) return;
+
+  fromEl.max = n - 1; fromEl.value = 0;
+  toEl.max   = n - 1; toEl.value   = n - 1;
+  _vdUpdateSliderUI();
+
+  async function onSliderChange() {
+    let lo = parseInt(fromEl.value);
+    let hi = parseInt(toEl.value);
+    if (lo > hi) {
+      if (this === fromEl) { fromEl.value = hi; lo = hi; }
+      else                 { toEl.value = lo;   hi = lo; }
+    }
+    _vdDateFrom = _vdDateList[lo];
+    _vdDateTo   = _vdDateList[hi];
+    _vdUpdateSliderUI();
+    _vdRefreshSessions();
+    await _vdRefreshBreakdown();
+  }
+
+  fromEl.addEventListener("input", onSliderChange);
+  toEl.addEventListener("input",   onSliderChange);
+}
+
+function _vdUpdateSliderUI() {
+  const n = _vdDateList.length;
+  if (!n) return;
+  const fromEl = document.getElementById("vdSliderFrom");
+  const toEl   = document.getElementById("vdSliderTo");
+  const fill   = document.getElementById("vdSliderFill");
+  const fromLbl = document.getElementById("vdSliderFromLabel");
+  const toLbl   = document.getElementById("vdSliderToLabel");
+  if (!fromEl || !toEl) return;
+  const lo = parseInt(fromEl.value), hi = parseInt(toEl.value);
+  if (fromLbl) fromLbl.textContent = _vdDateList[lo] || "—";
+  if (toLbl)   toLbl.textContent   = _vdDateList[hi] || "—";
+  if (fill) {
+    fill.style.left  = (lo / (n - 1) * 100) + "%";
+    fill.style.width = ((hi - lo) / (n - 1) * 100) + "%";
+  }
+}
+
+async function _vdResetDateFilter() {
+  const n = _vdDateList.length;
+  if (!n) return;
+  const fromEl = document.getElementById("vdSliderFrom");
+  const toEl   = document.getElementById("vdSliderTo");
+  if (fromEl) fromEl.value = 0;
+  if (toEl)   toEl.value   = n - 1;
+  _vdDateFrom = _vdDateList[0];
+  _vdDateTo   = _vdDateList[n - 1];
+  _vdUpdateSliderUI();
+  _vdRefreshSessions();
+  await _vdRefreshBreakdown();
+}
+
+async function _vdRefreshBreakdown() {
+  const params = new URLSearchParams();
+  if (_vdSessFilter.detector)    params.set("detector",     _vdSessFilter.detector);
+  if (_vdSessFilter.sessionType) params.set("session_type", _vdSessFilter.sessionType);
+  if (_vdDateFrom)               params.set("date_from",    _vdDateFrom);
+  if (_vdDateTo)                 params.set("date_to",      _vdDateTo);
+  const url = `/api/anomaly-breakdown/${_vdReg}/` + (params.toString() ? "?" + params : "");
+  const fd  = await fetch(url).then(r => r.json());
+  await _vdRenderDetectorChart(fd.by_detector);
+  const parts = [];
+  if (_vdSessFilter.detector)    parts.push(_vdSessFilter.detector.toUpperCase());
+  if (_vdSessFilter.sessionType) parts.push(_vdSessFilter.sessionType);
+  await _vdRenderSignalChart(fd.by_signal, parts.length ? parts.join(" · ") : _vdReg);
+}
 
 // ── CUSUM / IF filter maps (mirrors dashboard.js) ─────────────────────────
 const VD_CUSUM_FILTER = {
@@ -1392,7 +2653,7 @@ async function _vdRenderDetectorChart(byDetector) {
     if (_vdSessFilter.detector)    parts.push(label);
     if (_vdSessFilter.sessionType) parts.push(_vdSessFilter.sessionType);
     await _vdRenderSignalChart(fd.by_signal,
-      parts.length ? `${parts.join(" · ")} — ${_vdReg}` : _vdReg);
+      parts.length ? parts.join(" · ") : _vdReg);
     _vdRefreshSessions();
   });
 }
@@ -1401,7 +2662,8 @@ async function _vdRenderSignalChart(bySignal, scope) {
   const el = document.getElementById("vdSigChart");
   if (!el) return;
   el.innerHTML = "";
-  document.getElementById("vdSigHeader").textContent = `Signal Breakdown — ${scope}`;
+  const filterLabel = scope && scope !== _vdReg ? ` — ${scope}` : "";
+  document.getElementById("vdSigHeader").textContent = `Signal Breakdown${filterLabel}`;
   const labels = Object.keys(bySignal), values = Object.values(bySignal);
   if (!labels.length) {
     el.innerHTML = `<div style="padding:20px;color:#94a3b8;font-size:.82rem;text-align:center">No signal data</div>`;
@@ -1433,7 +2695,7 @@ async function _vdRenderTypeChart(sessions, scope) {
   const el = document.getElementById("vdTypeChart");
   if (!el) return;
   el.innerHTML = "";
-  document.getElementById("vdTypeHeader").textContent = `Session Type — ${scope}`;
+  document.getElementById("vdTypeHeader").textContent = `Session Type`;
   if (!sessions.length) {
     el.innerHTML = `<div style="padding:20px;color:#94a3b8;font-size:.82rem;text-align:center">No sessions</div>`;
     return;
@@ -1480,6 +2742,23 @@ async function _vdRenderTypeChart(sessions, scope) {
   });
 }
 
+// Numeric fields (right-align) — any field that renders as a number
+const VD_NUMERIC_FIELDS = new Set([
+  "days_since_first","soc_start","soc_end","soc_diff","soh","ekf_soh","duration_hr",
+  "if_score","composite_degradation_score",
+  "n_vsag","ir_ohm_mean","cell_spread_mean","energy_per_km","energy_kwh","n_low_soc",
+  "ref_capacity_ah","voltage_mean_new","current_mean_new",
+  "capacity_ah_discharge_new","capacity_ah_charge_new","capacity_ah_plugin_new","capacity_ah_charge_total_new",
+  "cycle_soh","block_capacity_ah","block_odometer_km","odometer_km","charging_rate_kw",
+  "cell_spread_max","weak_subsystem_consistency","hot_subsystem_consistency","subsystem_voltage_std",
+  "temp_rise_rate","bms_coverage","speed_mean","cum_efc","aging_index",
+  "vsag_rate_per_hr","ir_event_rate","ir_ohm_mean_ewm10","cell_spread_mean_ewm10",
+  "temp_rise_rate_ewm10","vsag_rate_per_hr_ewm10","vsag_trend_slope","ir_event_trend_slope",
+  "ir_ohm_trend_slope","spread_trend_slope","soh_trend_slope","c_rate_chg",
+  "dod_stress","thermal_stress","energy_per_loaded_session","total_alerts",
+  "n_cell_undervoltage","n_cell_overvoltage","block_soc_diff",
+]);
+
 // ── Sessions table renderer ───────────────────────────────────────────────
 function _vdRenderSessionRows(sessions) {
   if (!sessions.length)
@@ -1490,33 +2769,54 @@ function _vdRenderSessionRows(sessions) {
     const sid     = s.session_id ?? "";
     const cells   = VD_SESS_FIELDS.map(f => {
       const v = s[f];
+      const isNum = VD_NUMERIC_FIELDS.has(f);
+      const alignStyle = isNum ? "text-align:right" : "text-align:center";
+
       if (VD_SESS_BOOL.has(f)) {
-        return v ? `<td><span style="background:#fef3c7;color:#92400e;font-size:.7rem;padding:1px 5px;border-radius:3px;font-weight:600">Yes</span></td>`
-                 : `<td style="color:#cbd5e1;font-size:.75rem">—</td>`;
+        return v ? `<td style="${alignStyle}"><span style="background:#fef3c7;color:#92400e;font-size:.7rem;padding:1px 5px;border-radius:3px;font-weight:600">Yes</span></td>`
+                 : `<td style="${alignStyle};color:#cbd5e1;font-size:.75rem">—</td>`;
       }
-      if (f === "start_time_ist" || f === "end_time_ist") return `<td style="white-space:nowrap">${v??'—'}</td>`;
-      if (f === "registration_number") return `<td><span style="font-size:.78rem;font-weight:600">${v??'—'}</span></td>`;
+      if (f === "end_time_ist") return `<td style="white-space:nowrap;text-align:center">${v??'—'}</td>`;
+      if (f === "start_time_ist") return `<td style="white-space:nowrap;text-align:center">
+        <a class="tier-reg-link" style="font-size:.78rem;font-weight:700;color:#3b82f6;
+           text-decoration:underline;text-underline-offset:2px;cursor:pointer;
+           display:inline-flex;align-items:center;gap:3px"
+           title="Click to view telemetry for this session">
+          ${v??'—'}<span style="font-size:.65rem;opacity:.75">↗</span>
+        </a></td>`;
+      if (f === "registration_number") return `<td style="text-align:center"><span style="font-size:.78rem;font-weight:600">${v??'—'}</span></td>`;
       if (f === "session_type") {
         const label = v==="charging"?"Charging":v==="discharge"?"Discharging":(v??'—');
         const color = v==="charging"?"#fef3c7;color:#92400e":"#eff6ff;color:#1d4ed8";
-        return `<td><span style="background:${color};font-size:.7rem;padding:1px 5px;border-radius:3px;font-weight:600">${label}</span></td>`;
+        return `<td style="text-align:center"><span style="background:${color};font-size:.7rem;padding:1px 5px;border-radius:3px;font-weight:600">${label}</span></td>`;
       }
       if (f === "is_loaded") {
-        if (v==null) return "<td>—</td>";
-        return `<td>${(v==1||v===true)?"Inbound":"Outbound"}</td>`;
+        if (v==null) return `<td style="text-align:center">—</td>`;
+        return `<td style="text-align:center">${(v==1||v===true)?"Inbound":"Outbound"}</td>`;
       }
-      if (v==null) return "<td>—</td>";
-      if (f==="soc_start"||f==="soc_end") return `<td>${Math.round(v)}%</td>`;
-      if (typeof v==="number") return `<td>${v.toFixed(3)}</td>`;
-      if (typeof v==="boolean") return `<td>${v?"True":"False"}</td>`;
-      return `<td>${v}</td>`;
+      if (f === "composite_degradation_score") {
+        if (v==null) return `<td style="${alignStyle}">—</td>`;
+        return `<td style="${alignStyle};font-weight:600">${(v * 100).toFixed(1)}</td>`;
+      }
+      if (v==null) return `<td style="${alignStyle}">—</td>`;
+      if (f==="soc_start"||f==="soc_end") return `<td style="${alignStyle}">${Math.round(v)}%</td>`;
+      if (f==="soc_diff") return `<td style="${alignStyle}">${v!=null?v.toFixed(1)+'%':'—'}</td>`;
+      if (typeof v==="number") return `<td style="${alignStyle}">${v.toFixed(3)}</td>`;
+      if (typeof v==="boolean") return `<td style="${alignStyle}">${v?"True":"False"}</td>`;
+      return `<td style="text-align:center">${v}</td>`;
     }).join("");
 
-    const startLbl = (s.start_time_ist??'').replace(/'/g,'');
-    const rowClick = sid ? `onclick="vdLoadTelemetry('${_vdReg}','${sid}','${s.session_type??''}','${startLbl}')"` : '';
-    const titleAttr = sid ? `title="Click to view raw telemetry"` : '';
-    return `<tr ${titleAttr} ${rowClick}
-      style="font-size:.72rem;${flagged?'background:#fffbeb':''}${sid?';cursor:pointer':''}">
+    const startLbl  = (s.start_time_ist??'').replace(/'/g,'');
+    const isActive  = sid && sid === _vdActiveSessId;
+    const rowClick  = sid ? `onclick="vdLoadTelemetry('${_vdReg}','${sid}','${s.session_type??''}','${startLbl}')"` : '';
+    const titleAttr = sid ? `title="Click to view raw telemetry for this session"` : '';
+    const baseBg    = flagged ? '#fffbeb' : '#fff';
+    const activeBg  = '#dbeafe';                          // blue-100 when this row is open
+    const bgStyle   = isActive ? activeBg : baseBg;
+    const activeOutline = isActive
+      ? 'outline:2px solid #3b82f6;outline-offset:-2px;' : '';
+    return `<tr ${titleAttr} ${rowClick} data-sid="${sid}"
+      style="font-size:.72rem;background:${bgStyle};${activeOutline}${sid?'cursor:pointer;':''}transition:background .15s">
       ${cells}
     </tr>`;
   }).join("");
@@ -1543,7 +2843,7 @@ function _vdRefreshSessions() {
 
   const note = `Showing <strong>${filtered.length}</strong> anomalous sessions &nbsp;|&nbsp; ` +
     `${_vdSessCache.total_anomalous} anomalous of ${_vdSessCache.total_sessions} total${filterNote} ` +
-    `· amber = anomalous · click a row for telemetry · click charts to filter`;
+    `· <span style="color:#3b82f6;text-decoration:underline">rows are clickable</span> for telemetry`;
 
   const thead = `<thead><tr>${VD_SESS_HEADERS.map(h => {
     const tip = VD_COL_DESCRIPTIONS[h] || "";
@@ -1598,15 +2898,15 @@ async function renderVDSection4(sessData, bdData, reg, container) {
     <!-- Three donut charts -->
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px">
       <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
-        <div id="vdDetHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Alert Source — ${reg}</div>
+        <div id="vdDetHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Alert Source</div>
         <div id="vdDetChart" style="height:${VD_DONUT_H}px;display:flex;align-items:center;justify-content:center"></div>
       </div>
       <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
-        <div id="vdTypeHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Session Type — ${reg}</div>
+        <div id="vdTypeHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Session Type</div>
         <div id="vdTypeChart" style="height:${VD_DONUT_H}px;display:flex;align-items:center;justify-content:center"></div>
       </div>
       <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden">
-        <div id="vdSigHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Signal Breakdown — ${reg}</div>
+        <div id="vdSigHeader" style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">Signal Breakdown</div>
         <div id="vdSigChart" style="height:${VD_DONUT_H}px;display:flex;align-items:center;justify-content:center"></div>
       </div>
     </div>
@@ -1643,8 +2943,6 @@ async function renderVDSection4(sessData, bdData, reg, container) {
   requestAnimationFrame(async () => {
     if (bdData && bdData.by_detector) {
       await _vdRenderDetectorChart(bdData.by_detector);
-
-      // Click handler now lives inside _vdRenderDetectorChart (self-contained)
       await _vdRenderSignalChart(bdData.by_signal, reg);
     }
 
@@ -1670,6 +2968,16 @@ function detectTelGaps(timestamps, thresholdMs = 5 * 60 * 1000) {
 
 // ── Telemetry renderer ────────────────────────────────────────────────────
 async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
+  // Mark the selected row
+  _vdActiveSessId = sessionId;
+  document.querySelectorAll(`tr[data-sid]`).forEach(r => {
+    const active = r.dataset.sid === sessionId;
+    const flagged = r.style.background === 'rgb(255, 251, 235)';  // #fffbeb
+    r.style.background    = active ? '#dbeafe' : (flagged ? '#fffbeb' : '#fff');
+    r.style.outline       = active ? '2px solid #3b82f6' : '';
+    r.style.outlineOffset = active ? '-2px' : '';
+  });
+
   const section = document.getElementById("vdTelSection");
   const body    = document.getElementById("vdTelBody");
   const label   = document.getElementById("vdTelLabel");
@@ -1700,6 +3008,21 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
         _chg_pwr: (r.hves1_current!=null&&r.hves1_voltage_level!=null)
           ? Math.abs(r.hves1_current*r.hves1_voltage_level)/1000 : null,
       }));
+    } else {
+      // Discharge: compute rolling energy/km (window=15) from instantaneous power ÷ speed
+      const WIN = 15;
+      const epkRaw = base.map(r => {
+        if (r.hves1_current == null || r.hves1_voltage_level == null ||
+            r.speed == null || r.speed < 5) return null;
+        const pwr = Math.abs(r.hves1_current * r.hves1_voltage_level) / 1000; // kW
+        const epk = pwr / r.speed;  // kWh/km  (kW ÷ km/h = kWh/km)
+        return (epk > 0 && epk < 4) ? epk : null;  // clip implausible spikes
+      });
+      const epkSmoothed = epkRaw.map((_, i) => {
+        const slice = epkRaw.slice(Math.max(0, i - WIN + 1), i + 1).filter(v => v != null);
+        return slice.length >= 3 ? slice.reduce((s, v) => s + v, 0) / slice.length : null;
+      });
+      base = base.map((r, i) => ({ ...r, _epk: epkSmoothed[i] }));
     }
     if (base.length > MAX_PTS) {
       const step = Math.ceil(base.length / MAX_PTS);
@@ -1731,11 +3054,10 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
                                           {f:"temperature_lowest",color:"#06b6d4",name:"Min"}],            yLabel:"°C", multi:true },
     { title:"Cell Spread (mV)",  fields:[{f:"cell_spread",color:"#f59e0b",name:"Spread"}],                yLabel:"mV" },
     { title:"IR (Ω)",            fields:[{f:"ir_ohm",color:"#8b5cf6",name:"IR"}],                         yLabel:"Ω", connectgaps:true },
-    { title:"Voltage Sag Flag",  fields:[{f:"_vsag",color:"#ef4444",name:"Sag"}],                         yLabel:"flag", bar:true },
     { title:"Speed (km/h)",      fields:[{f:"speed",color:"#10b981",name:"Speed"}],                       yLabel:"km/h" },
-    { title:"Weak Subsystem #",  fields:[{f:"min_cell_voltage_subsystem_number",color:"#f97316",name:"Weak Subsys"}], yLabel:"subsys ID" },
-    { title:"Hot Subsystem #",   fields:[{f:"temperature_highest_subsystem_number",color:"#ef4444",name:"Hot Subsys"}], yLabel:"subsys ID" },
-    ...(isCharging ? [{ title:"Charging Power (kW)", fields:[{f:"_chg_pwr",color:"#0ea5e9",name:"Chg Power"}], yLabel:"kW" }] : []),
+    ...(isCharging  ? [{ title:"Charging Power (kW)",  fields:[{f:"_chg_pwr",color:"#0ea5e9",name:"Chg Power"}], yLabel:"kW" }] : []),
+    ...(!isCharging ? [{ title:"Energy / km (kWh/km)", fields:[{f:"_epk",   color:"#fb923c",name:"Eff."}],      yLabel:"kWh/km" }] : []),
+    { title:"Voltage Sag Flag",  fields:[{f:"_vsag",color:"#ef4444",name:"Sag"}],                         yLabel:"flag", bar:true },
   ];
 
   const chartIds = chartDefs.map((_, i) => `vdTelChart_${i}`);
@@ -1776,7 +3098,12 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
 
     const activeFields = fields.filter(({f}) => augRows.some(r => r[f] != null));
 
-    const traces = activeFields.map(({f, color, name}) => {
+    const _hexFill = (hex, a) => {
+      const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+      return `rgba(${r},${g},${b},${a})`;
+    };
+
+    const traces = activeFields.map(({f, color, name}, fi) => {
       if (bar) {
         return { x: ts, y: augRows.map(r => r[f] ?? null),
                  type: "bar", name, marker: {color},
@@ -1793,11 +3120,16 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
       }
       gappedX.push(...ts.slice(prev));
       gappedY.push(...rawY.slice(prev));
+      // Fill only the first trace per chart to avoid overlapping fills on multi-line charts
+      const fillProps = fi === 0
+        ? { fill: "tozeroy", fillcolor: _hexFill(color, 0.13) }
+        : {};
       return { x: gappedX, y: gappedY,
                type: "scatter", mode: "lines", name,
                line: {color, width: 1.5},
                connectgaps: !!connectgaps,
-               hovertemplate: `%{x}<br>${name}: %{y:.3f}<extra></extra>` };
+               hovertemplate: `%{x}<br>${name}: %{y:.3f}<extra></extra>`,
+               ...fillProps };
     });
 
     // Dashed bridge traces spanning each gap — one per field per gap
@@ -1837,6 +3169,31 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
 
   requestAnimationFrame(() => renderChartAt(0, wireCrosshair));
 
+  // Highlight charts whose signal caused the anomaly
+  const anomalyReason = (sessData?.sessions?.find(s => String(s.session_id) === String(sessionId))?.if_reason || "").toLowerCase();
+  const FIELD_SIGNAL_MAP = [
+    { field: "SoC (%)",           keys: ["soc","n_low_soc"] },
+    { field: "Temperature (°C)",  keys: ["temp","thermal"] },
+    { field: "Cell Spread (mV)",  keys: ["cell_spread","spread"] },
+    { field: "IR (Ω)",            keys: ["ir_ohm","ir_event","n_high_ir"] },
+    { field: "Voltage Sag Flag",  keys: ["n_vsag","d_vsag"] },
+    { field: "Speed (km/h)",      keys: ["odometer_km","speed"] },
+    { field: "Charging Power (kW)",  keys: ["c_rate_chg","slow_charging","fast_charging"] },
+    { field: "Energy / km (kWh/km)", keys: ["energy_per_km","high_energy_per_km","energy_per_loaded"] },
+  ];
+  requestAnimationFrame(() => {
+    if (!anomalyReason) return;
+    FIELD_SIGNAL_MAP.forEach(({ field, keys }) => {
+      if (keys.some(k => anomalyReason.includes(k))) {
+        const idx = chartDefs.findIndex(c => c.title === field);
+        if (idx >= 0) {
+          const el = document.getElementById(chartIds[idx]);
+          if (el) el.style.outline = "2px solid #ef4444";
+        }
+      }
+    });
+  });
+
   // Synchronized crosshair — runs after all charts are rendered
   function wireCrosshair() {
   syncIds.forEach(id => {
@@ -1864,3 +3221,538 @@ async function vdLoadTelemetry(reg, sessionId, sessionType, startTime) {
   });
   }  // end wireCrosshair
 }    // end vdLoadTelemetry
+
+/* ─── RUL vs time — uses actual EKF model RUL per session (aligns with bar chart) ── */
+function _renderRulScatter(reg) {
+  const wrap = document.getElementById("vdRulScatterWrap");
+  if (!wrap) return;
+
+  fetch(`/api/rul-timeline/${reg}/`)
+    .then(r => r.json())
+    .then(d => {
+      if (!d.points || !d.points.length) return;
+
+      const D2Y = 1 / 365.25;
+      const pts = d.points.filter(p => p.ekf_rul_days != null);
+      if (!pts.length) return;
+
+      const xDates = pts.map(p => p.date);
+      const yVals  = pts.map(p => p.ekf_rul_days * D2Y);   // years — same unit as bar chart
+      const xIdx   = pts.map((_, i) => i);
+
+      // CI band from ekf_rul_days_lo / hi if the EKF computed them
+      const hasCI  = pts.some(p => p.ekf_rul_days_lo != null && p.ekf_rul_days_hi != null);
+      const yLo    = hasCI ? pts.map(p => (p.ekf_rul_days_lo ?? p.ekf_rul_days) * D2Y) : null;
+      const yHi    = hasCI ? pts.map(p => (p.ekf_rul_days_hi ?? p.ekf_rul_days) * D2Y) : null;
+
+      // ── Least-squares linear fit ─────────────────────────────────────────
+      let linTrace = null;
+      if (yVals.length >= 3) {
+        try {
+          const n = xIdx.length;
+          const sx = xIdx.reduce((a, v) => a + v, 0), sy = yVals.reduce((a, v) => a + v, 0);
+          const sxx = xIdx.reduce((a, v) => a + v * v, 0);
+          const sxy = xIdx.reduce((a, v, i) => a + v * yVals[i], 0);
+          const m   = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+          const b   = (sy - m * sx) / n;
+          linTrace = {
+            type: "scatter", mode: "lines",
+            x: xDates, y: xIdx.map(i => b + m * i),
+            line: { color: "#ef4444", width: 1.8, dash: "solid" },
+            name: "Linear trend", hoverinfo: "skip",
+          };
+        } catch {}
+      }
+
+      // ── Rolling mean ± 2σ (Bollinger bands) ─────────────────────────────
+      let bbLo = null, bbHi = null, bbMid = null;
+      if (!hasCI && yVals.length >= 10) {
+        const WIN = Math.min(20, Math.floor(yVals.length / 3));
+        const means = [], stds = [];
+        for (let i = 0; i < yVals.length; i++) {
+          const sl = yVals.slice(Math.max(0, i - WIN + 1), i + 1);
+          const mu = sl.reduce((s, v) => s + v, 0) / sl.length;
+          const sg = Math.sqrt(sl.reduce((s, v) => s + (v - mu) ** 2, 0) / sl.length);
+          means.push(mu); stds.push(sg);
+        }
+        bbLo = {
+          type: "scatter", mode: "lines", x: xDates,
+          y: means.map((m, i) => Math.max(0, m - 2 * stds[i])),
+          line: { width: 0 }, showlegend: false, hoverinfo: "skip", name: "_bbl",
+        };
+        bbHi = {
+          type: "scatter", mode: "lines", x: xDates,
+          y: means.map((m, i) => m + 2 * stds[i]),
+          fill: "tonexty", fillcolor: "rgba(99,102,241,0.10)",
+          line: { color: "rgba(99,102,241,0.35)", dash: "dot", width: 1 },
+          name: "Rolling ±2σ",
+          hovertemplate: "Upper: %{y:.2f} yr<extra></extra>",
+        };
+        bbMid = {
+          type: "scatter", mode: "lines", x: xDates, y: means,
+          line: { color: "#6366f1", width: 1.2, dash: "dash" },
+          name: "Rolling mean",
+          hovertemplate: "Mean: %{y:.2f} yr<extra></extra>",
+        };
+      }
+
+      wrap.innerHTML = `
+        <div style="background:#fff;border-radius:8px;border:1px solid #e2e8f0;overflow:hidden;margin-top:4px">
+          <div style="padding:8px 12px;font-size:.72rem;font-weight:600;color:#475569;
+                      text-transform:uppercase;letter-spacing:.05em;background:#f8fafc;border-bottom:1px solid #e2e8f0">
+            EKF Remaining Useful Life over time (years) — same model as fleet bar chart
+          </div>
+          <div id="vdRulScatterChart" style="height:300px"></div>
+        </div>`;
+
+      requestAnimationFrame(() => {
+        const traces = [];
+        // CI band from EKF posterior (if available) — placed first so scatter renders on top
+        if (hasCI) {
+          traces.push(
+            { type: "scatter", mode: "lines", x: xDates, y: yLo,
+              line: { width: 0 }, showlegend: false, hoverinfo: "skip", name: "_cil" },
+            { type: "scatter", mode: "lines", x: xDates, y: yHi,
+              fill: "tonexty", fillcolor: "rgba(59,130,246,0.10)",
+              line: { color: "rgba(59,130,246,0.35)", dash: "dot", width: 1 },
+              name: "95% CI", hovertemplate: "CI upper: %{y:.2f} yr<extra></extra>" }
+          );
+        } else if (bbLo) {
+          traces.push(bbLo, bbHi);
+        }
+        traces.push({
+          type: "scatter", mode: "markers",
+          x: xDates, y: yVals,
+          marker: { color: "#3b82f6", size: 4.5, opacity: 0.65 },
+          name: "EKF RUL",
+          hovertemplate: "%{x}<br>EKF RUL: <b>%{y:.2f} yr</b><extra></extra>",
+        });
+        if (bbMid) traces.push(bbMid);
+        if (linTrace) traces.push(linTrace);
+
+        Plotly.newPlot("vdRulScatterChart", traces, {
+          paper_bgcolor: "transparent", plot_bgcolor: "#f8fafc",
+          font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+          margin: { l: 60, r: 16, t: 16, b: 60 },
+          xaxis: { title: { text: "Date", font: { size: 9 } }, gridcolor: "#e2e8f0", tickangle: -30, tickfont: { size: 8.5 } },
+          yaxis: { title: { text: "EKF RUL (years)", font: { size: 9 } }, gridcolor: "#e2e8f0", rangemode: "tozero", tickformat: ".1f" },
+          showlegend: true,
+          legend: { x: 0.98, xanchor: "right", y: 0.98, font: { size: 9 } },
+          hovermode: "x unified",
+        }, { displayModeBar: false, responsive: true });
+      });
+    })
+    .catch(() => {});
+}
+
+/* ─── Hot / Weak Subsystem fleet chart ───────────────────────────────────────── */
+function renderSubsystemChart() {
+  const el = document.getElementById("subsystemHeatPlot");
+  if (!el || !_vehicles) return;
+
+  // Use vehicle data if it has these fields, else use sessions aggregate from anom data
+  // We'll build from scatter data vehicle-level aggregates if available
+  // For now, use _vdSessCache if open, else skip
+  if (!_scatterData || !_scatterData.points) return;
+
+  // Group by vehicle: compute mean weak/hot consistency
+  const byVeh = {};
+  // We'll use the vehicles endpoint composite + anomaly for sorting
+  (_vehicles || []).forEach(v => {
+    byVeh[v.registration_number] = { reg: v.registration_number, composite: v.composite_degradation_score || 0 };
+  });
+
+  // Sort by composite descending
+  const sorted = Object.values(byVeh).sort((a,b) => b.composite - a.composite).slice(0, 30);
+  if (!sorted.length) return;
+
+  // Placeholder — will render when subsystem data is available
+  el.innerHTML = `<div style="padding:20px;color:#94a3b8;font-size:.82rem;text-align:center">
+    Subsystem chart renders in vehicle detail modal — click a vehicle to see its subsystem consistency.</div>`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ANIMATION SYSTEM
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+function initScrollReveal() {
+  // ── IntersectionObserver: fire .visible when element enters viewport ──────
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      const el = entry.target;
+
+      if (el.classList.contains("reveal-stagger")) {
+        el.classList.add("visible");
+        // KPI cards — add visible + staggered animation-delay
+        el.querySelectorAll(".kpi-card").forEach((card, i) => {
+          card.style.animationDelay = `${i * 0.07}s`;
+          card.style.animationDuration = "0.45s";
+          card.style.animationFillMode = "both";
+          card.style.animationName = "fadeInScale";
+          card.style.animationTimingFunction = "cubic-bezier(.22,.68,0,1.2)";
+        });
+      } else {
+        el.classList.add("visible");
+      }
+
+      // Pulse the nearest section-hdr if there is one
+      const hdr = el.classList.contains("section-hdr")
+        ? el
+        : el.querySelector ? el.querySelector(".section-hdr") : null;
+      if (hdr && !hdr.classList.contains("hdr-pulse")) {
+        hdr.classList.add("hdr-pulse");
+        setTimeout(() => hdr.classList.remove("hdr-pulse"), 3500);
+      }
+
+      observer.unobserve(el);  // only animate once
+    });
+  }, {
+    threshold: 0.08,
+    rootMargin: "0px 0px -40px 0px",
+  });
+
+  // Observe all .reveal and .reveal-stagger elements
+  document.querySelectorAll(".reveal, .reveal-stagger").forEach(el => observer.observe(el));
+
+  // ── Animate KPI value numbers with a smooth count-up ─────────────────────
+  _animateKpiCounters();
+}
+
+
+function _animateKpiCounters() {
+  // Wait a tick so values are already set by renderKPICards
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".kpi-value").forEach(el => {
+      el.classList.add("animating");
+      el.addEventListener("animationend", () => el.classList.remove("animating"), { once: true });
+    });
+  });
+}
+
+/* ─── Breakdown Timeline ──────────────────────────────────────────────────────── */
+let _breakdownRows = [];
+let _bdLastBarClickTime = 0;  // timestamp of last bar click — used to detect empty-area clicks
+
+function renderBreakdownTimeline(data) {
+  if (!data || !data.timeline || !data.timeline.length) return;
+
+  _breakdownRows = data.timeline;  // store for click-through
+  const eol = (_overview && _overview.eol_threshold) || 80;
+
+  _drawBreakdownChart(_breakdownRows, eol, null);
+  _buildBreakdownTable(_breakdownRows, eol, null);
+}
+
+function _rulCI(r) {
+  // Returns { lo, hi } in days — uses EKF posterior bounds if available,
+  // otherwise propagates ekf_soh_std through the RUL formula (2σ → 95% CI).
+  if (r.rul_lo != null && r.rul_hi != null) {
+    return { lo: r.rul_lo, hi: r.rul_hi };
+  }
+  const slope = Math.abs(r.soh_slope || 0.005);
+  const sigmaRul = 2 * (r.ekf_soh_std || 0.5) / slope;
+  return { lo: Math.max(0, r.rul_days - sigmaRul), hi: r.rul_days + sigmaRul };
+}
+
+/* ─── Breakdown table sort state ────────────────────────────────────────────── */
+let _breakdownSortCol = null;   // null = default (rul desc)
+let _breakdownSortDir = 1;      // 1 = asc, -1 = desc
+
+function _breakdownSort(col) {
+  if (_breakdownSortCol !== col) {
+    _breakdownSortCol = col;
+    _breakdownSortDir = 1;
+  } else if (_breakdownSortDir === 1) {
+    _breakdownSortDir = -1;
+  } else {
+    _breakdownSortCol = null;   // third click: reset to default
+    _breakdownSortDir = 1;
+  }
+  _updateBreakdownSortHeaders();
+  const eol = (_overview && _overview.eol_threshold) || 80;
+  _buildBreakdownTable(_breakdownRows, eol, null);
+}
+
+function _updateBreakdownSortHeaders() {
+  document.querySelectorAll(".bd-sort-ind").forEach(el => {
+    el.textContent = el.dataset.col === _breakdownSortCol
+      ? (_breakdownSortDir === 1 ? " ▲" : " ▼") : "";
+  });
+}
+
+/* ─── Bar-chart RUL color for a registration (used by tier badges + bar chart) ─ */
+function _barColorForReg(reg) {
+  if (!_breakdownRows || !_breakdownRows.length) return { bg: "#f8fafc", fg: "#64748b" };
+  const byRul = [..._breakdownRows].filter(r => r.rul_days != null).sort((a, b) => a.rul_days - b.rul_days);
+  const worstSet = new Set(byRul.slice(0, 5).map(r => r.registration_number));
+  const row = _breakdownRows.find(r => r.registration_number === reg);
+  const days = row ? row.rul_days : null;
+  if (days == null) return { bg: "#f8fafc", fg: "#64748b" };
+  if (worstSet.has(reg) || days < 365)  return { bg: "#fef2f2", fg: "#b91c1c" };
+  if (days < 1095) return { bg: "#fffbeb", fg: "#92400e" };
+  return { bg: "#f0fdf4", fg: "#166534" };
+}
+
+function _drawBreakdownChart(rows, eol, highlightReg) {
+  const el = document.getElementById("breakdownTimelinePlot");
+  if (!el) return;
+
+  // Sort highest RUL → lowest RUL (leftmost bar = healthiest vehicle)
+  const valid = rows
+    .filter(r => r.rul_days != null)
+    .sort((a, b) => b.rul_days - a.rul_days);
+
+  // Color by RUL level; always force bottom-5 (worst) to red
+  const rulColor = (days) =>
+    days == null ? "#94a3b8"
+    : days < 365  ? "#ef4444"
+    : days < 1095 ? "#f59e0b"
+    : "#22c55e";
+
+  const worstSet = new Set(valid.slice(-5).map(r => r.registration_number));
+
+  const colors = valid.map(r =>
+    r.registration_number === highlightReg ? "#1d4ed8"
+    : worstSet.has(r.registration_number) ? "#ef4444"
+    : rulColor(r.rul_days)
+  );
+  const outlines = valid.map(r =>
+    r.registration_number === highlightReg ? "#93c5fd" : "rgba(0,0,0,0)"
+  );
+
+  const D2Y = 1 / 365.25;
+  const errHi = [], errLo = [];
+  valid.forEach(r => {
+    const { lo, hi } = _rulCI(r);
+    errHi.push((hi - r.rul_days) * D2Y);
+    errLo.push((r.rul_days - lo) * D2Y);
+  });
+
+  const customdata = valid.map(r => {
+    const { lo, hi } = _rulCI(r);
+    return [
+      r.ekf_soh != null ? r.ekf_soh.toFixed(2) : (r.current_soh != null ? r.current_soh.toFixed(2) : "—"),
+      r.soh_slope != null ? r.soh_slope.toFixed(5) : "—",
+      r.eol_date || "—",
+      (lo * D2Y).toFixed(2),
+      (hi * D2Y).toFixed(2),
+    ];
+  });
+
+  // Median RUL line
+  const rulDays = valid.map(r => r.rul_days).sort((a, b) => a - b);
+  const medRulYr = rulDays[Math.floor(rulDays.length / 2)] * D2Y;
+
+  Plotly.newPlot(el, [{
+    type: "bar",
+    x: valid.map(r => r.registration_number),
+    y: valid.map(r => r.rul_days * D2Y),
+    marker: {
+      color: colors,
+      line: { color: outlines, width: 2 },
+    },
+    error_y: {
+      type: "data",
+      array: errHi,
+      arrayminus: errLo,
+      visible: true,
+      color: "#64748b",
+      thickness: 1.5,
+      width: 4,
+    },
+    customdata,
+    showlegend: false,
+    hovertemplate:
+      "<b>%{x}</b><br>" +
+      "RUL: <b>%{y:.2f} yr</b><br>" +
+      "95% CI: %{customdata[3]} – %{customdata[4]} yr<br>" +
+      "EKF SoH: %{customdata[0]}%<br>" +
+      "Daily slope: %{customdata[1]}%/day<br>" +
+      "Proj. EoL: %{customdata[2]}<extra></extra>",
+  }], {
+    paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+    margin: { l: 60, r: 16, t: 16, b: 90 },
+    xaxis: {
+      title: { text: "Vehicle Registration", font: { size: 9.5 } },
+      gridcolor: "#e2e8f0", tickfont: { size: 8.5 }, tickangle: -38,
+    },
+    yaxis: {
+      title: { text: "Remaining Useful Life (years)", font: { size: 9.5 } },
+      gridcolor: "#e2e8f0", tickfont: { size: 9 }, rangemode: "tozero",
+      tickformat: ".1f",
+    },
+    showlegend: false,
+    bargap: 0.25,
+    shapes: [{
+      type: "line", xref: "paper", yref: "y",
+      x0: 0, x1: 1, y0: medRulYr, y1: medRulYr,
+      line: { color: "#475569", width: 1.5, dash: "dash" },
+    }],
+    annotations: [{
+      xref: "paper", yref: "y",
+      x: 0.01, y: medRulYr, xanchor: "left", yanchor: "bottom",
+      text: `Median RUL: ${medRulYr.toFixed(1)} yr`,
+      showarrow: false,
+      font: { size: 8.5, color: "#475569", family: "Plus Jakarta Sans" },
+      bgcolor: "rgba(255,255,255,0.85)", borderpad: 2,
+    }],
+  }, { displayModeBar: false, responsive: true });
+
+  // Click-through: clicking a bar highlights that row in the table
+  el.on("plotly_click", evt => {
+    _bdLastBarClickTime = Date.now();
+    const pt  = evt.points[0];
+    const reg = pt && pt.x;
+    if (!reg) return;
+    _buildBreakdownTable(_breakdownRows, eol, reg);
+    const row = document.querySelector(`#breakdownTableBody tr[data-reg="${reg}"]`);
+    if (row) row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    _drawBreakdownChart(_breakdownRows, eol, reg);
+  });
+
+  // Click on empty chart area → deselect
+  if (el._bdClickHandler) el.removeEventListener("click", el._bdClickHandler);
+  el._bdClickHandler = function() {
+    if (Date.now() - _bdLastBarClickTime > 80 && highlightReg !== null) {
+      _buildBreakdownTable(_breakdownRows, eol, null);
+      _drawBreakdownChart(_breakdownRows, eol, null);
+    }
+  };
+  el.addEventListener("click", el._bdClickHandler);
+}
+
+// Store ref_date for EoL re-computation
+let data_refDate = null;
+
+function _buildBreakdownTable(rows, eol, activeReg) {
+  // Tier badge: T1=red, T2=amber, T3=green (matches tier meaning)
+  const _badge = (tier) => {
+    if (!tier) return "";
+    const MAP = {
+      1: { bg: "#fef2f2", fg: "#b91c1c", tip: "T1 — Immediate attention" },
+      2: { bg: "#fffbeb", fg: "#b45309", tip: "T2 — Monitor closely" },
+      3: { bg: "#f0fdf4", fg: "#166534", tip: "T3 — Elevated but stable" },
+    };
+    const { bg, fg, tip } = MAP[tier] || { bg: "#f8fafc", fg: "#64748b", tip: "" };
+    return `<span style="background:${bg};color:${fg};font-size:.68rem;font-weight:700;padding:1px 6px;border-radius:4px;cursor:default" title="${tip}">T${tier}</span>`;
+  };
+
+  // Apply user-selected sort; default = highest RUL first
+  let sorted;
+  if (_breakdownSortCol) {
+    const dir = _breakdownSortDir;
+    sorted = [...rows].sort((a, b) => {
+      let av, bv;
+      switch (_breakdownSortCol) {
+        case "reg":   av = a.registration_number || ""; bv = b.registration_number || ""; break;
+        case "soh":   av = a.ekf_soh ?? a.current_soh ?? -Infinity; bv = b.ekf_soh ?? b.current_soh ?? -Infinity; break;
+        case "rul":   av = a.rul_days ?? -Infinity;  bv = b.rul_days ?? -Infinity;  break;
+        case "ci_lo": av = _rulCI(a).lo ?? -Infinity; bv = _rulCI(b).lo ?? -Infinity; break;
+        case "ci_hi": av = _rulCI(a).hi ?? -Infinity; bv = _rulCI(b).hi ?? -Infinity; break;
+        case "eol":   av = a.eol_date || ""; bv = b.eol_date || ""; break;
+        default:      av = a.rul_days ?? -Infinity;  bv = b.rul_days ?? -Infinity;
+      }
+      return av < bv ? -dir : av > bv ? dir : 0;
+    });
+  } else {
+    sorted = [...rows].sort((a, b) => {
+      if (a.rul_days == null && b.rul_days == null) return 0;
+      if (a.rul_days == null) return 1;
+      if (b.rul_days == null) return -1;
+      return b.rul_days - a.rul_days;
+    });
+  }
+
+  document.getElementById("breakdownTableBody").innerHTML = sorted.map(r => {
+    const isActive = r.registration_number === activeReg;
+    const ekfSoh   = r.ekf_soh != null ? r.ekf_soh.toFixed(2) + "%" : (r.current_soh != null ? r.current_soh.toFixed(2) + "%" : "—");
+    const rulStr   = r.rul_days != null ? `${(r.rul_days / 365.25).toFixed(2)} yr` : "—";
+    const { lo, hi } = r.rul_days != null ? _rulCI(r) : { lo: null, hi: null };
+    const ciLoStr  = lo != null ? `${(lo / 365.25).toFixed(2)} yr` : "—";
+    const ciHiStr  = hi != null ? `${(hi / 365.25).toFixed(2)} yr` : "—";
+    const badge    = _badge(r.tier);
+    const rowStyle = isActive ? "background:#eff6ff;" : "";
+    return `<tr data-reg="${r.registration_number}"
+               style="cursor:pointer;${rowStyle}"
+               onclick="openVehicleDetail && openVehicleDetail('${r.registration_number}')">
+      <td style="white-space:nowrap">${badge}&nbsp;<span style="font-size:.69rem;font-weight:${isActive?700:500};color:#2563eb">${r.registration_number}</span></td>
+      <td class="text-end" style="font-size:.69rem">${ekfSoh}</td>
+      <td class="text-end" style="font-size:.69rem;font-weight:${isActive?700:400}">${rulStr}</td>
+      <td class="text-end" style="font-size:.69rem;color:#64748b">${ciLoStr}</td>
+      <td class="text-end" style="font-size:.69rem;color:#64748b">${ciHiStr}</td>
+      <td class="text-end" style="font-size:.69rem;font-weight:600">${r.eol_date || "—"}</td>
+    </tr>`;
+  }).join("");
+}
+
+/* ─── Data Distributions ──────────────────────────────────────────────────────── */
+function renderDistributions(data) {
+  if (!data) return;
+  _renderHistogram(
+    "cycleSohHistPlot",
+    data.cycle_soh || [],
+    "Cycle SoH (%)",
+    `n = ${(data.cycle_soh_n || 0).toLocaleString()} quality-gated observations`,
+    "#3b82f6",
+    1.0,
+    [85, 102]
+  );
+  _renderHistogram(
+    "blockSohHistPlot",
+    data.block_soh || [],
+    "Block SoH (%)",
+    `n = ${(data.block_soh_n || 0).toLocaleString()} discharge blocks (deduplicated)`,
+    "#10b981",
+    1.0,
+    [85, 102]
+  );
+}
+
+function _renderHistogram(elId, vals, xLabel, subtitle, color, binSize, xRange) {
+  const el = document.getElementById(elId);
+  if (!el || !vals.length) return;
+
+  const sorted = [...vals].sort((a, b) => a - b);
+  const mu  = vals.reduce((s, v) => s + v, 0) / vals.length;
+  const sig = Math.sqrt(vals.reduce((s, v) => s + (v - mu) ** 2, 0) / vals.length);
+  const med = sorted[Math.floor(sorted.length / 2)];
+
+  Plotly.newPlot(el, [{
+    type: "histogram",
+    x: vals,
+    autobinx: false,
+    xbins: { size: binSize },
+    marker: { color, opacity: 0.78 },
+    hovertemplate: `${xLabel}: %{x}<br>Sessions: %{y}<extra></extra>`,
+  }], {
+    paper_bgcolor: "white", plot_bgcolor: "#f8fafc",
+    font: { family: "Plus Jakarta Sans, system-ui, sans-serif", size: 10, color: "#475569" },
+    margin: { l: 48, r: 14, t: 38, b: 52 },
+    title: {
+      text: `${subtitle}  ·  µ = ${mu.toFixed(1)}  σ = ${sig.toFixed(1)}  median = ${med.toFixed(1)}`,
+      font: { size: 10, color: "#475569" }, x: 0.02, xanchor: "left",
+    },
+    xaxis: {
+      title: { text: xLabel, font: { size: 9.5 } },
+      range: xRange || undefined,
+      gridcolor: "#e2e8f0", tickfont: { size: 9 },
+    },
+    yaxis: {
+      title: { text: "Sessions", font: { size: 9.5 } },
+      gridcolor: "#e2e8f0", tickfont: { size: 9 },
+    },
+    shapes: [{
+      type: "line", x0: med, x1: med, y0: 0, y1: 1,
+      xref: "x", yref: "paper",
+      line: { color: "#1e293b", width: 1.5, dash: "dash" },
+    }],
+    annotations: [{
+      x: med, y: 0.96, xref: "x", yref: "paper",
+      text: `median = ${med.toFixed(1)}`, showarrow: false,
+      font: { size: 8.5, color: "#1e293b", family: "Plus Jakarta Sans" },
+      bgcolor: "rgba(255,255,255,.85)", borderpad: 2,
+    }],
+  }, { displayModeBar: false, responsive: true });
+}
