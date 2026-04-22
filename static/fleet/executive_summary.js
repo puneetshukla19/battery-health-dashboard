@@ -276,9 +276,13 @@ function _drawDeltaChart() {
   let traces;
 
   if (_scatterVeh) {
-    // Show full vehicle history — no date-slider filter
     let pts = (_deltaData.vehicle_points || [])
-      .filter(p => p.registration_number === _scatterVeh);
+      .filter(p => {
+        if (p.registration_number !== _scatterVeh) return false;
+        if (_sec3DateFrom && p.date < _sec3DateFrom) return false;
+        if (_sec3DateTo   && p.date > _sec3DateTo)   return false;
+        return true;
+      });
     pts.sort((a, b) => a.date < b.date ? -1 : 1);
     traces = [{
       type: "scatter", mode: "lines+markers",
@@ -289,8 +293,12 @@ function _drawDeltaChart() {
       hovertemplate: "%{x}<br>EKF − BMS delta: %{y:.2f}%<extra></extra>",
     }];
   } else {
-    // Fleet-wide daily median delta — always full range, no date-slider filter
     let ft = [...(_deltaData.fleet_trend || [])];
+    ft = ft.filter(p => {
+      if (_sec3DateFrom && p.date < _sec3DateFrom) return false;
+      if (_sec3DateTo   && p.date > _sec3DateTo)   return false;
+      return true;
+    });
     ft.sort((a, b) => a.date < b.date ? -1 : 1);
     traces = [{
       type: "scatter", mode: "lines",
@@ -357,24 +365,24 @@ function buildVehicleSlider() {
   _sec3DateFrom = nd ? _sec3DateList[0]      : null;
   _sec3DateTo   = nd ? _sec3DateList[nd - 1] : null;
 
-  const labelStyle = "font-size:.74rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap";
+  const labelStyle = "font-size:.68rem;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap";
 
-  // Grid columns: [label] [veh-slider 180px] [veh-name auto] [checkbox+label auto] [right-info 1fr]
+  // Grid columns: [label] [veh-slider 140px] [veh-name auto] [checkbox+label auto] [right-info 1fr]
   // Date slider spans cols 2-4 (same pixel span as slider+name+checkbox), Reset sits in col 5.
   container.innerHTML = `
-    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;margin-bottom:10px">
-      <div style="display:grid;grid-template-columns:auto 180px auto auto 1fr;align-items:center;row-gap:${nd > 1 ? "18px" : "0"};column-gap:8px">
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:7px 12px;margin-bottom:10px">
+      <div style="display:grid;grid-template-columns:auto 140px auto auto 1fr;align-items:center;row-gap:${nd > 1 ? "10px" : "0"};column-gap:6px">
 
         <!-- Row 1: vehicle filter -->
         <label style="${labelStyle}">Vehicle</label>
         <input type="range" id="vehSlider" min="0" max="${allVeh.length - 1}" value="0" step="1"
           style="width:100%;accent-color:#a855f7" ${_scatterVeh ? "" : "disabled"}>
-        <span id="vehSliderLabel" style="font-size:.75rem;font-weight:600;color:#a855f7;min-width:120px;padding:0 4px;white-space:nowrap">—</span>
-        <div style="display:flex;align-items:center;gap:6px">
-          <input type="checkbox" id="vehSliderToggle" style="accent-color:#94a3b8;width:14px;height:14px;flex-shrink:0">
-          <label for="vehSliderToggle" style="font-size:.74rem;color:#64748b;cursor:pointer;white-space:nowrap">Enable vehicle filter</label>
+        <span id="vehSliderLabel" style="font-size:.7rem;font-weight:600;color:#a855f7;min-width:110px;padding:0 4px;white-space:nowrap">—</span>
+        <div style="display:flex;align-items:center;gap:5px">
+          <input type="checkbox" id="vehSliderToggle" style="accent-color:#94a3b8;width:12px;height:12px;flex-shrink:0">
+          <label for="vehSliderToggle" style="font-size:.68rem;color:#64748b;cursor:pointer;white-space:nowrap">Enable vehicle filter</label>
         </div>
-        <div style="font-size:.72rem;color:#94a3b8;white-space:nowrap;text-align:right;padding-left:8px">${allVeh.length} vehicles · sorted alphabetically</div>
+        <div style="font-size:.67rem;color:#94a3b8;white-space:nowrap;text-align:right;padding-left:6px">${allVeh.length} vehicles · sorted alphabetically</div>
 
         ${nd > 1 ? `
         <!-- Row 2: date range slider spans cols 2-4, reset in col 5 -->
@@ -389,12 +397,12 @@ function buildVehicleSlider() {
             <input type="range" id="sec3SliderTo"   min="0" max="${nd - 1}" value="${nd - 1}" step="1"
               style="position:absolute;width:100%;height:4px;top:8px;-webkit-appearance:none;appearance:none;background:transparent;accent-color:#a855f7;cursor:pointer">
           </div>
-          <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:.75rem;color:#475569;font-weight:500">
+          <div style="display:flex;justify-content:space-between;margin-top:3px;font-size:.7rem;color:#475569;font-weight:500">
             <span id="sec3DateFromLabel">${_sec3DateFrom}</span>
             <span id="sec3DateToLabel">${_sec3DateTo}</span>
           </div>
         </div>
-        <button onclick="_sec3ResetDate()" style="font-size:.7rem;color:#a855f7;background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;white-space:nowrap;text-align:right">Reset</button>
+        <button onclick="_sec3ResetDate()" style="font-size:.67rem;color:#a855f7;background:none;border:none;cursor:pointer;padding:0;text-decoration:underline;white-space:nowrap;text-align:right">Reset</button>
         ` : ""}
       </div>
     </div>
@@ -900,11 +908,7 @@ function renderBayesCoef(data) {
       return `<b>${label}</b> (−${weight}% per ${unitOf(k)})`;
     });
 
-    const sigNote = sigSorted.length
-      ? `${sigSorted.length} of ${sorted.length} signals are fleet-wide significant (CI excludes 0).`
-      : "";
-    descEl.innerHTML =
-      `The model's key degradation drivers: ${sentences.join(", ")}. ${sigNote}`.trim();
+    descEl.innerHTML = "";
   }
 }
 
@@ -1971,7 +1975,7 @@ async function openVehicleDetail(reg) {
     ]);
 
     body.innerHTML = "";
-    renderVDSection1(vehicle, tierInfo, body);
+    renderVDSection1(vehicle, tierInfo, body, sessData);
     renderVDSection2(bands, vehicle, body);
     renderVDSection3(coef, vehicle, body);
     renderVDSection4(sessData, bdData, reg, body);
@@ -1989,7 +1993,7 @@ function closeVehicleDetail() {
 }
 
 /* ─── Section 1: Signal Analysis ────────────────────────────────────────────── */
-function renderVDSection1(vehicle, tierInfo, container) {
+function renderVDSection1(vehicle, tierInfo, container, sessData) {
   const soh       = vehicle.current_soh;
   const slope     = vehicle["soh_slope_%per_day"];
   const composite = vehicle.composite_degradation_score;
@@ -2020,6 +2024,30 @@ function renderVDSection1(vehicle, tierInfo, container) {
 
   const rulAnalysis       = generateRulAnalysis(vehicle);
   const compositeAnalysis = generateCompositeAnalysis(vehicle);
+
+  // Replace all stale numbers in the tier signal text with live values
+  let liveSignal = tierInfo.signal || "";
+  if (liveSignal) {
+    const totalSess = (sessData && sessData.total_sessions) || null;
+    if (soh      != null) {
+      liveSignal = liveSignal.replace(/EKF SoH\s+[\d.]+%/gi, `EKF SoH ${soh.toFixed(2)}%`);
+      liveSignal = liveSignal.replace(/\(([\d.]+%)\)(?=\s*[—\-])/g, `(${soh.toFixed(2)}%)`);
+    }
+    if (composite != null)
+      liveSignal = liveSignal.replace(/degradation risk score\s*\(?[\d.]+\)?/gi,
+                                      `degradation risk score (${composite.toFixed(4)})`);
+    if (slope != null)
+      liveSignal = liveSignal.replace(/declining at\s+[+-]?[\d.]+%\/day/gi,
+                                      `declining at ${slope.toFixed(4)}%/day`);
+    if (rulDays != null)
+      liveSignal = liveSignal.replace(/EKF RUL\s+[\d.]+\s*years?/gi,
+                                      `EKF RUL ${(rulDays / 365.25).toFixed(1)} years`);
+    if (anomCount != null) {
+      const pctStr = totalSess ? ` (${(anomCount / totalSess * 100).toFixed(1)}%)` : "";
+      liveSignal = liveSignal.replace(/\d+\s+flagged sessions?(?:\s*\([^)]*\))?/gi,
+                                      `${anomCount} flagged sessions${pctStr}`);
+    }
+  }
 
   const sec = document.createElement("div");
   sec.className = "vd-section";
@@ -2059,7 +2087,7 @@ function renderVDSection1(vehicle, tierInfo, container) {
         <div class="vd-stat-value" style="font-size:.8rem">${vehicle.rul_reliability ? vehicle.rul_reliability.replace(/_/g," ") : "—"}</div>
       </div>
     </div>
-    ${tierInfo.signal ? `<div class="vd-analysis-box">${tierInfo.signal}</div>` : ""}
+    ${liveSignal ? `<div class="vd-analysis-box">${liveSignal}</div>` : ""}
     ${rulAnalysis ? `<div class="vd-rul-warn">${rulAnalysis}</div>` : ""}
     ${compositeAnalysis && vehicle.registration_number !== "MH18BZ3195" ? `<div class="vd-rul-warn" style="background:#fffbeb;border-color:#f59e0b;color:#78350f;margin-top:10px">${compositeAnalysis}</div>` : ""}
     <div id="vdRulScatterWrap" style="margin-top:14px"></div>
